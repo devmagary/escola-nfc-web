@@ -5,7 +5,8 @@
 
 const $ = id => document.getElementById(id);
 
-let supabase = null;
+// Variável renomeada para 'supabaseClient' para evitar conflito com window.supabase da CDN
+let supabaseClient = null;
 let espUrl = "http://nfc.local";
 let ultimoSeqDetectado = 0;
 let alunoEditandoId = null;
@@ -13,18 +14,35 @@ let fotoBlobProntoParaUpload = null;
 let listaAlunosCache = [];
 let streamWebcam = null;
 
+// Funções utilitárias seguras para localStorage (evita travar em file:///)
+function obterStorage(chave, padrao = '') {
+  try {
+    return localStorage.getItem(chave) || padrao;
+  } catch (e) {
+    return padrao;
+  }
+}
+
+function salvarStorage(chave, valor) {
+  try {
+    localStorage.setItem(chave, valor);
+  } catch (e) {}
+}
+
 // Áudio sintético suave para aviso de aproximação do cartão
 function emitirBipSonoro(tipo = 'ok') {
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.connect(gain);
     gain.connect(ctx.destination);
     
     if (tipo === 'ok') {
-      osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
-      osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15); // A5
+      osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15);
       gain.gain.setValueAtTime(0.15, ctx.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.2);
       osc.start(ctx.currentTime);
@@ -42,6 +60,7 @@ function emitirBipSonoro(tipo = 'ok') {
 
 function toast(msg, tipo = '') {
   const t = $('toast');
+  if (!t) return;
   t.textContent = msg;
   t.className = 'show ' + tipo;
   clearTimeout(t._timer);
@@ -52,56 +71,63 @@ function toast(msg, tipo = '') {
 // NAVEGAÇÃO ENTRE ABAS
 // =====================================================================
 function trocarAba(nomeAba) {
+  // Esconde todas as abas
   document.querySelectorAll('.tab-pane').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.nav-btn').forEach(el => el.classList.remove('active'));
 
-  $('aba-' + nomeAba).classList.add('active');
-  
+  // Ativa a aba alvo
+  const painel = $('aba-' + nomeAba);
+  if (painel) {
+    painel.classList.add('active');
+  }
+
+  // Atualiza botão ativo
   const botoes = document.querySelectorAll('.nav-btn');
-  if (nomeAba === 'portaria') botoes[0].classList.add('active');
-  if (nomeAba === 'secretaria') {
+  if (nomeAba === 'portaria' && botoes[0]) botoes[0].classList.add('active');
+  if (nomeAba === 'secretaria' && botoes[1]) {
     botoes[1].classList.add('active');
     carregarAlunosDoSupabase();
   }
-  if (nomeAba === 'config') botoes[2].classList.add('active');
+  if (nomeAba === 'config' && botoes[2]) botoes[2].classList.add('active');
 }
 
 // =====================================================================
 // INICIALIZAÇÃO & CONFIGURAÇÕES
 // =====================================================================
 function carregarConfiguracoes() {
-  const url = localStorage.getItem('cfg_supabase_url') || '';
-  const key = localStorage.getItem('cfg_supabase_key') || '';
-  const esp = localStorage.getItem('cfg_esp_url') || 'http://nfc.local';
+  const url = obterStorage('cfg_supabase_url');
+  const key = obterStorage('cfg_supabase_key');
+  const esp = obterStorage('cfg_esp_url', 'http://nfc.local');
 
-  $('cfgSupabaseUrl').value = url;
-  $('cfgSupabaseKey').value = key;
-  $('cfgEspUrl').value = esp;
+  if ($('cfgSupabaseUrl')) $('cfgSupabaseUrl').value = url;
+  if ($('cfgSupabaseKey')) $('cfgSupabaseKey').value = key;
+  if ($('cfgEspUrl')) $('cfgEspUrl').value = esp;
   espUrl = esp.replace(/\/$/, '');
 
-  if (url && key && window.supabase) {
+  // Conecta ao Supabase usando o objeto global window.supabase da CDN
+  if (url && key && window.supabase && window.supabase.createClient) {
     try {
-      supabase = window.supabase.createClient(url, key);
-      $('dotSupabase').className = 'dot online';
-      $('txtStatusSupabase').textContent = 'Conectado';
+      supabaseClient = window.supabase.createClient(url, key);
+      if ($('dotSupabase')) $('dotSupabase').className = 'dot online';
+      if ($('txtStatusSupabase')) $('txtStatusSupabase').textContent = 'Conectado';
     } catch (e) {
-      $('dotSupabase').className = 'dot offline';
-      $('txtStatusSupabase').textContent = 'Erro Chave';
+      if ($('dotSupabase')) $('dotSupabase').className = 'dot offline';
+      if ($('txtStatusSupabase')) $('txtStatusSupabase').textContent = 'Erro Chave';
     }
   } else {
-    $('dotSupabase').className = 'dot offline';
-    $('txtStatusSupabase').textContent = 'Pendente';
+    if ($('dotSupabase')) $('dotSupabase').className = 'dot offline';
+    if ($('txtStatusSupabase')) $('txtStatusSupabase').textContent = 'Configurar';
   }
 }
 
 function salvarConfiguracoes() {
-  const url = $('cfgSupabaseUrl').value.trim();
-  const key = $('cfgSupabaseKey').value.trim();
-  const esp = $('cfgEspUrl').value.trim();
+  const url = $('cfgSupabaseUrl') ? $('cfgSupabaseUrl').value.trim() : '';
+  const key = $('cfgSupabaseKey') ? $('cfgSupabaseKey').value.trim() : '';
+  const esp = $('cfgEspUrl') ? $('cfgEspUrl').value.trim() : '';
 
-  localStorage.setItem('cfg_supabase_url', url);
-  localStorage.setItem('cfg_supabase_key', key);
-  localStorage.setItem('cfg_esp_url', esp);
+  salvarStorage('cfg_supabase_url', url);
+  salvarStorage('cfg_supabase_key', key);
+  salvarStorage('cfg_esp_url', esp);
 
   toast('Configurações salvas com sucesso!', 'ok');
   carregarConfiguracoes();
@@ -112,12 +138,17 @@ async function testarConexoes() {
   toast('Testando conexões...', '');
 
   // 1. Testa Supabase
-  if (supabase) {
-    const { data, error } = await supabase.from('alunos').select('id').limit(1);
-    if (!error) {
-      toast('Supabase conectado com sucesso!', 'ok');
-    } else {
-      toast('Erro no Supabase: ' + error.message, 'err');
+  if (supabaseClient) {
+    try {
+      const { data, error } = await supabaseClient.from('alunos').select('id').limit(1);
+      if (!error) {
+        toast('Supabase conectado com sucesso!', 'ok');
+      } else {
+        toast('Erro no Supabase: ' + error.message, 'err');
+        return;
+      }
+    } catch (e) {
+      toast('Falha de rede com o Supabase: ' + e.message, 'err');
       return;
     }
   } else {
@@ -143,15 +174,13 @@ async function testarConexoes() {
 // =====================================================================
 function redimensionarEComprimirImagem(imgOriginal) {
   return new Promise((resolve) => {
-    const canvas = $('canvasCompressor');
+    const canvas = $('canvasCompressor') || document.createElement('canvas');
     const ctx = canvas.getContext('2d');
 
-    // Define tamanho padrão de carteirinha escolar (máximo 500x500 quadrado)
     const maxDim = 500;
     let width = imgOriginal.width;
     let height = imgOriginal.height;
 
-    // Calcula corte proporcional centralizado
     let srcX = 0, srcY = 0, srcSize = Math.min(width, height);
     srcX = (width - srcSize) / 2;
     srcY = (height - srcSize) / 2;
@@ -159,10 +188,8 @@ function redimensionarEComprimirImagem(imgOriginal) {
     canvas.width = maxDim;
     canvas.height = maxDim;
 
-    // Desenha cortado e redimensionado
     ctx.drawImage(imgOriginal, srcX, srcY, srcSize, srcSize, 0, 0, maxDim, maxDim);
 
-    // Exporta como JPEG com compressão ótima (85% de qualidade = ~35 a 45 KB)
     canvas.toBlob((blob) => {
       resolve(blob);
     }, 'image/jpeg', 0.85);
@@ -179,7 +206,7 @@ function processarArquivoFoto(event) {
     img.onload = async function() {
       fotoBlobProntoParaUpload = await redimensionarEComprimirImagem(img);
       const urlPreview = URL.createObjectURL(fotoBlobProntoParaUpload);
-      $('previewFotoForm').src = urlPreview;
+      if ($('previewFotoForm')) $('previewFotoForm').src = urlPreview;
       toast('Foto otimizada para ' + Math.round(fotoBlobProntoParaUpload.size / 1024) + ' KB!', 'ok');
     };
     img.src = e.target.result;
@@ -191,6 +218,7 @@ function processarArquivoFoto(event) {
 async function abrirModalCamera() {
   const modal = $('modalCamera');
   const video = $('videoWebcam');
+  if (!modal || !video) return;
   modal.style.display = 'flex';
 
   try {
@@ -205,7 +233,7 @@ async function abrirModalCamera() {
 }
 
 function fecharModalCamera() {
-  $('modalCamera').style.display = 'none';
+  if ($('modalCamera')) $('modalCamera').style.display = 'none';
   if (streamWebcam) {
     streamWebcam.getTracks().forEach(t => t.stop());
     streamWebcam = null;
@@ -214,7 +242,7 @@ function fecharModalCamera() {
 
 async function capturarFotoWebcam() {
   const video = $('videoWebcam');
-  const canvas = $('canvasCompressor');
+  const canvas = $('canvasCompressor') || document.createElement('canvas');
   canvas.width = video.videoWidth || 640;
   canvas.height = video.videoHeight || 640;
 
@@ -224,7 +252,7 @@ async function capturarFotoWebcam() {
   const img = new Image();
   img.onload = async function() {
     fotoBlobProntoParaUpload = await redimensionarEComprimirImagem(img);
-    $('previewFotoForm').src = URL.createObjectURL(fotoBlobProntoParaUpload);
+    if ($('previewFotoForm')) $('previewFotoForm').src = URL.createObjectURL(fotoBlobProntoParaUpload);
     fecharModalCamera();
     toast('Foto capturada e otimizada!', 'ok');
   };
@@ -235,28 +263,43 @@ async function capturarFotoWebcam() {
 // SECRETARIA: CRUD DE ALUNOS NO SUPABASE
 // =====================================================================
 async function carregarAlunosDoSupabase() {
-  if (!supabase) return;
-  const { data, error } = await supabase
-    .from('alunos')
-    .select('*')
-    .order('nome_completo', { ascending: true });
-
-  if (error) {
-    toast('Erro ao buscar alunos: ' + error.message, 'err');
+  const tb = $('corpoTabelaAlunos');
+  
+  if (!supabaseClient) {
+    if (tb) {
+      tb.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:30px; color:var(--text-muted);">' +
+        '⚠️ Supabase ainda não configurado.<br><small>Acesse a aba <strong>Configurações</strong> e insira a URL e a Chave do projeto.</small></td></tr>';
+    }
     return;
   }
 
-  listaAlunosCache = data || [];
-  renderizarTabelaAlunos(listaAlunosCache);
+  try {
+    const { data, error } = await supabaseClient
+      .from('alunos')
+      .select('*')
+      .order('nome_completo', { ascending: true });
+
+    if (error) {
+      toast('Erro ao buscar alunos: ' + error.message, 'err');
+      if (tb) tb.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:30px; color:var(--danger);">Erro: ${error.message}</td></tr>`;
+      return;
+    }
+
+    listaAlunosCache = data || [];
+    renderizarTabelaAlunos(listaAlunosCache);
+  } catch (err) {
+    toast('Falha ao conectar com o banco: ' + err.message, 'err');
+  }
 }
 
 function renderizarTabelaAlunos(lista) {
   const tb = $('corpoTabelaAlunos');
+  if (!tb) return;
   tb.innerHTML = '';
-  $('contagemAlunos').textContent = lista.length;
+  if ($('contagemAlunos')) $('contagemAlunos').textContent = lista.length;
 
   if (lista.length === 0) {
-    tb.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:30px; color:var(--text-muted);">Nenhum aluno cadastrado.</td></tr>';
+    tb.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:30px; color:var(--text-muted);">Nenhum aluno cadastrado no sistema.</td></tr>';
     return;
   }
 
@@ -308,7 +351,7 @@ function renderizarTabelaAlunos(lista) {
 }
 
 function filtrarTabelaAlunos() {
-  const busca = $('buscaAlunos').value.trim().toLowerCase();
+  const busca = $('buscaAlunos') ? $('buscaAlunos').value.trim().toLowerCase() : '';
   const filtrados = listaAlunosCache.filter(a => 
     a.nome_completo.toLowerCase().includes(busca) ||
     (a.matricula && a.matricula.toLowerCase().includes(busca)) ||
@@ -320,12 +363,14 @@ function filtrarTabelaAlunos() {
 
 // Salvar Novo ou Atualizar Aluno
 async function salvarAluno(ev) {
-  ev.preventDefault();
-  if (!supabase) return toast('Configure o Supabase primeiro na aba Configurações!', 'err');
+  if (ev) ev.preventDefault();
+  if (!supabaseClient) return toast('Configure o Supabase primeiro na aba Configurações!', 'err');
 
   const btnSalvar = $('btnSalvarAluno');
-  btnSalvar.disabled = true;
-  btnSalvar.textContent = 'Gravando no banco...';
+  if (btnSalvar) {
+    btnSalvar.disabled = true;
+    btnSalvar.textContent = 'Gravando no banco...';
+  }
 
   try {
     const uid = $('campoUid').value.trim().toUpperCase();
@@ -333,10 +378,10 @@ async function salvarAluno(ev) {
 
     // 1. Se uma foto nova foi carregada/tirada, faz upload para o cofre do Supabase
     if (fotoBlobProntoParaUpload) {
-      btnSalvar.textContent = 'Enviando foto (Supabase Storage)...';
+      if (btnSalvar) btnSalvar.textContent = 'Enviando foto (Supabase Storage)...';
       const nomeArquivo = uid.replace(/[^A-Z0-9]/g, '') + '_' + Date.now() + '.jpg';
       
-      const { data: uploadData, error: uploadErr } = await supabase.storage
+      const { data: uploadData, error: uploadErr } = await supabaseClient.storage
         .from('fotos-alunos')
         .upload(nomeArquivo, fotoBlobProntoParaUpload, {
           contentType: 'image/jpeg',
@@ -345,7 +390,7 @@ async function salvarAluno(ev) {
 
       if (uploadErr) throw new Error('Erro ao salvar foto: ' + uploadErr.message);
 
-      const { data: urlData } = supabase.storage
+      const { data: urlData } = supabaseClient.storage
         .from('fotos-alunos')
         .getPublicUrl(nomeArquivo);
 
@@ -366,11 +411,11 @@ async function salvarAluno(ev) {
     };
 
     if (alunoEditandoId) {
-      const { error } = await supabase.from('alunos').update(payload).eq('id', alunoEditandoId);
+      const { error } = await supabaseClient.from('alunos').update(payload).eq('id', alunoEditandoId);
       if (error) throw error;
       toast('Aluno atualizado com sucesso!', 'ok');
     } else {
-      const { error } = await supabase.from('alunos').insert([payload]);
+      const { error } = await supabaseClient.from('alunos').insert([payload]);
       if (error) throw error;
       toast('Aluno cadastrado com sucesso!', 'ok');
     }
@@ -381,8 +426,10 @@ async function salvarAluno(ev) {
   } catch (err) {
     toast(err.message, 'err');
   } finally {
-    btnSalvar.disabled = false;
-    btnSalvar.textContent = 'Salvar Aluno';
+    if (btnSalvar) {
+      btnSalvar.disabled = false;
+      btnSalvar.textContent = 'Salvar Aluno';
+    }
   }
 }
 
@@ -411,16 +458,17 @@ function iniciarEdicaoAluno(id) {
 function limparFormularioAluno() {
   alunoEditandoId = null;
   fotoBlobProntoParaUpload = null;
-  $('formAluno').reset();
-  $('campoAtivo').checked = true;
-  $('previewFotoForm').src = 'https://via.placeholder.com/150/1e293b/94a3b8?text=Sem+Foto';
-  $('tituloFormAluno').textContent = '➕ Cadastrar Aluno';
-  $('btnSalvarAluno').textContent = 'Salvar Aluno';
-  $('btnCancelarEdicao').style.display = 'none';
+  if ($('formAluno')) $('formAluno').reset();
+  if ($('campoAtivo')) $('campoAtivo').checked = true;
+  if ($('previewFotoForm')) $('previewFotoForm').src = 'https://via.placeholder.com/150/1e293b/94a3b8?text=Sem+Foto';
+  if ($('tituloFormAluno')) $('tituloFormAluno').textContent = '➕ Cadastrar Aluno';
+  if ($('btnSalvarAluno')) $('btnSalvarAluno').textContent = 'Salvar Aluno';
+  if ($('btnCancelarEdicao')) $('btnCancelarEdicao').style.display = 'none';
 }
 
 async function alternarAtivoAluno(id, novoStatus) {
-  const { error } = await supabase.from('alunos').update({ ativo: novoStatus }).eq('id', id);
+  if (!supabaseClient) return;
+  const { error } = await supabaseClient.from('alunos').update({ ativo: novoStatus }).eq('id', id);
   if (!error) {
     toast('Permissão de acesso alterada!', 'ok');
     carregarAlunosDoSupabase();
@@ -428,8 +476,9 @@ async function alternarAtivoAluno(id, novoStatus) {
 }
 
 async function excluirAluno(id, nome) {
+  if (!supabaseClient) return;
   if (!confirm(`Tem certeza que deseja excluir o aluno "${nome}"?`)) return;
-  const { error } = await supabase.from('alunos').delete().eq('id', id);
+  const { error } = await supabaseClient.from('alunos').delete().eq('id', id);
   if (!error) {
     toast('Aluno excluído', 'ok');
     carregarAlunosDoSupabase();
@@ -460,10 +509,9 @@ async function processarCartaoNaPortaria(uid) {
   const badge = $('totemStatusBadge');
   const btnWpp = $('btnWhatsapp');
 
-  if (!supabase) return;
+  if (!supabaseClient) return;
 
-  // Busca o aluno no Supabase
-  const { data: alunos, error } = await supabase
+  const { data: alunos, error } = await supabaseClient
     .from('alunos')
     .select('*')
     .eq('uid_nfc', uid)
@@ -474,7 +522,6 @@ async function processarCartaoNaPortaria(uid) {
   if (alunos && alunos.length > 0) {
     const aluno = alunos[0];
 
-    // Preenche a tela grande
     $('totemFoto').src = aluno.foto_url || 'https://via.placeholder.com/500/1e293b/94a3b8?text=Sem+Foto';
     $('totemNome').textContent = aluno.nome_completo;
     $('totemMatricula').textContent = aluno.matricula || '—';
@@ -494,7 +541,6 @@ async function processarCartaoNaPortaria(uid) {
       badge.textContent = 'ACESSO BLOQUEADO';
     }
 
-    // Configura o botão do WhatsApp
     if (aluno.telefone_responsavel) {
       const telLimpo = aluno.telefone_responsavel.replace(/\D/g, '');
       const msg = encodeURIComponent(`Olá ${aluno.nome_responsavel || ''}! Informamos que o aluno(a) ${aluno.nome_completo} acabou de passar na portaria da escola às ${agora}.`);
@@ -504,8 +550,7 @@ async function processarCartaoNaPortaria(uid) {
       btnWpp.style.display = 'none';
     }
 
-    // Registra entrada na tabela de histórico do Supabase
-    supabase.from('historico_acessos').insert([{
+    supabaseClient.from('historico_acessos').insert([{
       uid_nfc: uid,
       aluno_id: aluno.id,
       nome_identificado: aluno.nome_completo,
@@ -514,7 +559,6 @@ async function processarCartaoNaPortaria(uid) {
       status: aluno.ativo ? 'LIBERADO' : 'BLOQUEADO'
     }]).then();
 
-    // Adiciona ao topo da lista de recentes da portaria
     adicionarNaListaRecentes({
       nome: aluno.nome_completo,
       turma: aluno.turma,
@@ -523,7 +567,6 @@ async function processarCartaoNaPortaria(uid) {
     });
 
   } else {
-    // Cartão Desconhecido
     emitirBipSonoro('erro');
     $('totemFoto').src = 'https://via.placeholder.com/500/334155/ef4444?text=Nao+Cadastrado';
     $('totemNome').textContent = 'Cartão Desconhecido';
@@ -547,6 +590,7 @@ async function processarCartaoNaPortaria(uid) {
 
 function adicionarNaListaRecentes(item) {
   const lista = $('listaRecentes');
+  if (!lista) return;
   if (lista.children.length === 1 && lista.children[0].textContent.includes('Nenhum acesso')) {
     lista.innerHTML = '';
   }
@@ -576,28 +620,59 @@ async function monitorarEsp32() {
     clearTimeout(timeoutId);
 
     if (resp.ok) {
-      $('dotEsp').className = 'dot online';
-      $('txtStatusEsp').textContent = 'Online';
+      if ($('dotEsp')) $('dotEsp').className = 'dot online';
+      if ($('txtStatusEsp')) $('txtStatusEsp').textContent = 'Online';
 
       const dados = await resp.json();
       
-      // Se detectou uma leitura nova
       if (dados.seq && dados.seq > ultimoSeqDetectado) {
         ultimoSeqDetectado = dados.seq;
         processarCartaoNaPortaria(dados.uid);
       }
     } else {
-      $('dotEsp').className = 'dot offline';
-      $('txtStatusEsp').textContent = 'Falha';
+      if ($('dotEsp')) $('dotEsp').className = 'dot offline';
+      if ($('txtStatusEsp')) $('txtStatusEsp').textContent = 'Falha';
     }
   } catch (e) {
-    $('dotEsp').className = 'dot offline';
-    $('txtStatusEsp').textContent = 'Offline';
+    if ($('dotEsp')) $('dotEsp').className = 'dot offline';
+    if ($('txtStatusEsp')) $('txtStatusEsp').textContent = 'Offline';
   }
 
   setTimeout(monitorarEsp32, 1200);
 }
 
-// Inicialização da Aplicação
-carregarConfiguracoes();
-monitorarEsp32();
+// =====================================================================
+// REGISTRO GLOBAL DE FUNÇÕES (GARANTE ACESSO MESMO COM INLINE ONCLICK)
+// =====================================================================
+window.trocarAba = trocarAba;
+window.salvarConfiguracoes = salvarConfiguracoes;
+window.testarConexoes = testarConexoes;
+window.salvarAluno = salvarAluno;
+window.iniciarEdicaoAluno = iniciarEdicaoAluno;
+window.limparFormularioAluno = limparFormularioAluno;
+window.alternarAtivoAluno = alternarAtivoAluno;
+window.excluirAluno = excluirAluno;
+window.capturarUidDoEsp = capturarUidDoEsp;
+window.abrirModalCamera = abrirModalCamera;
+window.fecharModalCamera = fecharModalCamera;
+window.capturarFotoWebcam = capturarFotoWebcam;
+window.processarArquivoFoto = processarArquivoFoto;
+window.filtrarTabelaAlunos = filtrarTabelaAlunos;
+
+// Inicialização segura após o carregamento do DOM
+document.addEventListener('DOMContentLoaded', () => {
+  carregarConfiguracoes();
+  monitorarEsp32();
+
+  // Garante que os botões de navegação funcionem com click listener
+  const botoesNav = document.querySelectorAll('.nav-btn');
+  if (botoesNav[0]) botoesNav[0].addEventListener('click', () => trocarAba('portaria'));
+  if (botoesNav[1]) botoesNav[1].addEventListener('click', () => trocarAba('secretaria'));
+  if (botoesNav[2]) botoesNav[2].addEventListener('click', () => trocarAba('config'));
+});
+
+// Se o script carregar após o DOMContentLoaded, inicializa imediatamente
+if (document.readyState === 'complete' || document.readyState === 'interactive') {
+  carregarConfiguracoes();
+  monitorarEsp32();
+}
