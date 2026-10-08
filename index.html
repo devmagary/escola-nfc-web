@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sistema de Acesso Escolar NFC</title>
   <link rel="stylesheet" href="style.css">
-  <!-- Biblioteca Oficial do Supabase via CDN (dispensa compilações complexas) -->
+  <!-- Biblioteca Oficial do Supabase via CDN -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -17,22 +17,25 @@
       <span>Acesso Escolar NFC</span>
     </div>
 
-    <!-- Abas de Navegação -->
-    <nav class="nav-tabs">
-      <button class="nav-btn active" onclick="trocarAba('portaria')">
+    <!-- Abas de Navegação (Exibição controlada por permissões de cargo) -->
+    <nav class="nav-tabs" id="navTabsContainer">
+      <button class="nav-btn active" id="btnNavPortaria" onclick="trocarAba('portaria')">
         <span>🏢</span> Portaria
       </button>
-      <button class="nav-btn" onclick="trocarAba('secretaria')">
+      <button class="nav-btn" id="btnNavSecretaria" onclick="trocarAba('secretaria')">
         <span>📝</span> Secretaria
       </button>
-      <button class="nav-btn" onclick="trocarAba('config')">
+      <button class="nav-btn" id="btnNavUsuarios" onclick="trocarAba('usuarios')" style="display:none;">
+        <span>👥</span> Usuários
+      </button>
+      <button class="nav-btn" id="btnNavConfig" onclick="trocarAba('config')" style="display:none;">
         <span>⚙️</span> Configurações
       </button>
     </nav>
 
-    <!-- Indicadores de Status -->
+    <!-- Indicadores de Status e Identificação do Usuário -->
     <div class="status-badges">
-      <div class="badge-status" id="badgeEsp">
+      <div class="badge-status" id="badgeEsp" onclick="alterarIpEspRapido()" style="cursor:pointer;" title="Clique para testar ou alterar o IP do ESP32">
         <span class="dot" id="dotEsp"></span>
         <span>ESP32: <strong id="txtStatusEsp">Buscando...</strong></span>
       </div>
@@ -40,11 +43,61 @@
         <span class="dot" id="dotSupabase"></span>
         <span>Nuvem: <strong id="txtStatusSupabase">Configurar</strong></span>
       </div>
+
+      <!-- Menu do Usuário Conectado -->
+      <div class="user-menu" id="menuUsuario" style="display:none;">
+        <div class="user-profile-badge">
+          <div class="user-avatar-circle" id="avatarUsuario">U</div>
+          <div class="user-info-text">
+            <span class="user-nome-topo" id="nomeUsuarioTopo">Usuário</span>
+            <span class="badge-cargo" id="cargoUsuarioTopo">Portaria</span>
+          </div>
+        </div>
+        <button type="button" class="btn-logout" onclick="fazerLogout()" title="Sair da Conta">
+          <span>🚪</span> Sair
+        </button>
+      </div>
     </div>
   </header>
 
+  <!-- =====================================================================
+       TELA DE LOGIN (EXIBIDA QUANDO NÃO HOUVER SESSÃO ATIVA)
+       ===================================================================== -->
+  <div class="auth-wrapper" id="telaLogin" style="display:flex;">
+    <div class="auth-card">
+      <div class="auth-logo">🎓</div>
+      <h1 class="auth-title">Acesso Escolar NFC</h1>
+      <p class="auth-subtitle">Faça login com sua conta autorizada para acessar o sistema.</p>
+
+      <form class="auth-form" id="formLogin" onsubmit="fazerLogin(event)">
+        <div class="form-group">
+          <label for="loginEmail">E-mail Institucional</label>
+          <input type="email" id="loginEmail" class="form-control" required placeholder="seu.email@escola.com" autocomplete="username">
+        </div>
+
+        <div class="form-group" style="margin-top:14px;">
+          <label for="loginSenha">Senha</label>
+          <input type="password" id="loginSenha" class="form-control" required placeholder="••••••••" autocomplete="current-password">
+        </div>
+
+        <button type="submit" class="btn-primario" id="btnEntrarLogin" style="width:100%; margin-top:20px; padding:12px;">
+          Entrar no Sistema
+        </button>
+      </form>
+
+      <div class="auth-extra-links" style="margin-top:16px;">
+        <button type="button" class="btn-secundario" onclick="abrirModalPrimeiroAdmin()" style="width:100%; border-color:var(--primary); color:#93c5fd; padding:10px;">
+          👤 Cadastrar 1º Administrador do Sistema
+        </button>
+        <a onclick="abrirModalConfigSupabaseRapido()" style="color:var(--text-muted); cursor:pointer; text-align:center; margin-top:8px;">
+          ⚙️ Configurar URL e Chaves do Supabase
+        </a>
+      </div>
+    </div>
+  </div>
+
   <!-- CONTEÚDO PRINCIPAL -->
-  <main>
+  <main id="conteudoPrincipal" style="display:none;">
 
     <!-- ===================================================================
          ABA 1: PORTARIA EM TEMPO REAL (TOTEM DO PORTEIRO)
@@ -55,7 +108,7 @@
         <!-- Cartão Grande do Aluno Detectado -->
         <div class="card-totem" id="cardTotem">
           <div class="foto-wrapper">
-            <img id="totemFoto" class="foto-aluno-grande" src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=500&auto=format&fit=crop&q=80" alt="Foto do Aluno">
+            <img id="totemFoto" class="foto-aluno-grande" src="" alt="Foto do Aluno">
           </div>
 
           <h2 class="aluno-nome" id="totemNome">Aguardando Aproximação...</h2>
@@ -85,7 +138,7 @@
 
           <!-- Botão WhatsApp com Link Direto -->
           <a id="btnWhatsapp" href="#" target="_blank" class="btn-whatsapp" style="display:none;">
-            <span>💬</span> Falar com Responsável no WhatsApp
+            <span>💬</span> Notificar Responsável no WhatsApp
           </a>
         </div>
 
@@ -109,7 +162,7 @@
       <div class="secretaria-layout">
         
         <!-- Formulário de Cadastro / Edição -->
-        <div class="card-form">
+        <div class="card-form" id="cardFormAluno">
           <h2 class="form-title" id="tituloFormAluno">➕ Cadastrar Aluno</h2>
 
           <form id="formAluno" onsubmit="salvarAluno(event)">
@@ -117,7 +170,7 @@
             <!-- Foto com Upload ou Câmera -->
             <div class="foto-upload-box">
               <div class="foto-preview-container">
-                <img id="previewFotoForm" class="foto-preview" src="https://via.placeholder.com/150/1e293b/94a3b8?text=Sem+Foto" alt="Prévia">
+                <img id="previewFotoForm" class="foto-preview" src="" alt="Prévia">
               </div>
               <div class="foto-acoes-botoes">
                 <button type="button" class="btn-secundario" onclick="$('inputArquivoFoto').click()">
@@ -191,10 +244,15 @@
 
         <!-- Tabela de Alunos Cadastrados -->
         <div class="card-tabela">
-          <div class="tabela-topo">
-            <h3 style="display:flex; align-items:center; gap:8px;">
-              <span>👥</span> Alunos Cadastrados (<span id="contagemAlunos">0</span>)
-            </h3>
+          <div class="tabela-topo" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+            <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+              <h3 style="display:flex; align-items:center; gap:8px; margin:0;">
+                <span>👥</span> Alunos Cadastrados (<span id="contagemAlunos">0</span>)
+              </h3>
+              <button type="button" class="btn-secundario btn-sync-esp" onclick="sincronizarTodosAlunosComEsp()" title="Grava toda a lista de alunos na memória Flash do ESP32 para garantir funcionamento 100% offline">
+                <span>🔄</span> Sincronizar com ESP32
+              </button>
+            </div>
             <input type="search" id="buscaAlunos" class="form-control" placeholder="🔍 Buscar aluno, matrícula ou UID..." style="max-width:260px;" oninput="filtrarTabelaAlunos()">
           </div>
 
@@ -220,7 +278,45 @@
     </section>
 
     <!-- ===================================================================
-         ABA 3: CONFIGURAÇÕES (SUPABASE E ESP32)
+         ABA 3: GESTÃO DE USUÁRIOS E PERMISSÕES (RBAC - EXCLUSIVA ADMIN)
+         =================================================================== -->
+    <section id="aba-usuarios" class="tab-pane">
+      <div class="card-tabela" style="max-width:1100px; margin:0 auto;">
+        <div class="tabela-topo">
+          <div>
+            <h2 style="display:flex; align-items:center; gap:8px; font-size:1.3rem;">
+              <span>👥</span> Usuários e Permissões do Sistema (<span id="contagemUsuarios">0</span>)
+            </h2>
+            <p style="color:var(--text-muted); font-size:0.85rem; margin-top:4px;">
+              Gerencie quem pode acessar cada área do sistema (Portaria, Secretaria, Coordenação, Direção e Técnico).
+            </p>
+          </div>
+          <button type="button" class="btn-primario" onclick="abrirModalNovoUsuario()">
+            ➕ Novo Usuário
+          </button>
+        </div>
+
+        <div style="overflow-x:auto; margin-top:16px;">
+          <table>
+            <thead>
+              <tr>
+                <th>Nome Completo</th>
+                <th>E-mail de Acesso</th>
+                <th>Cargo / Função</th>
+                <th>Status</th>
+                <th style="text-align:right;">Ações</th>
+              </tr>
+            </thead>
+            <tbody id="corpoTabelaUsuarios">
+              <tr><td colspan="5" style="text-align:center; padding:30px; color:var(--text-muted);">Carregando usuários...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================================
+         ABA 4: CONFIGURAÇÕES (SUPABASE E ESP32)
          =================================================================== -->
     <section id="aba-config" class="tab-pane">
       <div class="card-form" style="max-width:680px; margin:0 auto;">
@@ -242,22 +338,158 @@
 
         <div class="form-group">
           <label for="cfgEspUrl">Endereço IP ou Host do ESP32-S3</label>
-          <input type="text" id="cfgEspUrl" class="form-control" placeholder="http://nfc.local ou http://192.168.1.150">
+          <input type="text" id="cfgEspUrl" class="form-control" placeholder="http://192.168.0.73">
           <small style="color:var(--text-muted); font-size:0.75rem;">
             O endereço que aparece no Monitor Serial quando o ESP32 conecta no Wi-Fi.
           </small>
         </div>
 
-        <div style="display:flex; gap:12px; margin-top:24px;">
+        <div style="display:flex; gap:12px; margin-top:24px; flex-wrap:wrap;">
           <button type="button" class="btn-primario" onclick="salvarConfiguracoes()">Salvar Configurações</button>
           <button type="button" class="btn-secundario" onclick="testarConexoes()">Testar Conexões</button>
+          <button type="button" class="btn-secundario btn-sync-esp" onclick="sincronizarTodosAlunosComEsp()">🔄 Sincronizar Base com ESP32</button>
         </div>
       </div>
     </section>
 
   </main>
 
-  <!-- MODAL PARA TIRAR FOTO COM A WEBCAM -->
+  <!-- =====================================================================
+       MODAIS DO SISTEMA
+       ===================================================================== -->
+
+  <!-- MODAL: CRIAR / EDITAR USUÁRIO -->
+  <div class="modal-overlay" id="modalUsuario">
+    <div class="modal-content" style="max-width:480px; text-align:left;">
+      <h3 id="tituloModalUsuario" style="margin-bottom:16px;">➕ Novo Usuário</h3>
+      
+      <form id="formUsuario" onsubmit="salvarDadosUsuario(event)">
+        <input type="hidden" id="usuarioEditandoId">
+
+        <div class="form-group">
+          <label for="campoUsuarioNome">Nome Completo *</label>
+          <input type="text" id="campoUsuarioNome" class="form-control" required placeholder="Ex: Roberto Carlos Pereira">
+        </div>
+
+        <div class="form-group" style="margin-top:12px;">
+          <label for="campoUsuarioEmail">E-mail Institucional *</label>
+          <input type="email" id="campoUsuarioEmail" class="form-control" required placeholder="roberto@escola.com">
+        </div>
+
+        <div class="form-group" style="margin-top:12px;" id="boxSenhaUsuario">
+          <label for="campoUsuarioSenha">Senha Provisória *</label>
+          <input type="password" id="campoUsuarioSenha" class="form-control" placeholder="Mínimo 6 caracteres">
+        </div>
+
+        <div class="form-group" style="margin-top:12px;">
+          <label for="campoUsuarioCargo">Cargo / Nível de Permissão *</label>
+          <select id="campoUsuarioCargo" class="form-control" required>
+            <option value="portaria">🏢 Portaria (Apenas Totem em Tempo Real)</option>
+            <option value="secretaria">📝 Secretaria (Cadastros de Alunos e Fotos)</option>
+            <option value="coordenacao">📚 Coordenação (Acompanhamento e Consulta)</option>
+            <option value="direcao">🏛️ Direção Escolar (Visão Geral e Alunos)</option>
+            <option value="admin">🛠️ Técnico / Administrador (Controle Total)</option>
+          </select>
+        </div>
+
+        <div class="form-group" style="margin-top:14px;">
+          <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+            <input type="checkbox" id="campoUsuarioAtivo" checked style="width:18px; height:18px;">
+            <span>Usuário Ativo (Pode efetuar login no sistema)</span>
+          </label>
+        </div>
+
+        <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:24px;">
+          <button type="button" class="btn-secundario" onclick="fecharModalUsuario()">Cancelar</button>
+          <button type="submit" class="btn-primario" id="btnSalvarUsuario">Salvar Usuário</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: REDEFINIR SENHA DE USUÁRIO -->
+  <div class="modal-overlay" id="modalSenhaUsuario">
+    <div class="modal-content" style="max-width:400px; text-align:left;">
+      <h3 style="margin-bottom:8px;">🔑 Redefinir Senha</h3>
+      <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom:16px;" id="descRedefinirSenha">
+        Informe a nova senha para o usuário.
+      </p>
+
+      <form onsubmit="confirmarRedefinicaoSenha(event)">
+        <input type="hidden" id="usuarioSenhaId">
+        <div class="form-group">
+          <label for="campoNovaSenha">Nova Senha *</label>
+          <input type="password" id="campoNovaSenha" class="form-control" required minlength="6" placeholder="Mínimo 6 caracteres">
+        </div>
+
+        <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:20px;">
+          <button type="button" class="btn-secundario" onclick="$('modalSenhaUsuario').style.display='none'">Cancelar</button>
+          <button type="submit" class="btn-primario">Atualizar Senha</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: CADASTRAR 1º ADMINISTRADOR DO SISTEMA -->
+  <div class="modal-overlay" id="modalPrimeiroAdmin">
+    <div class="modal-content" style="max-width:460px; text-align:left;">
+      <h3 style="margin-bottom:8px;">🛠️ Cadastro do 1º Administrador</h3>
+      <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom:16px;">
+        Nenhum usuário foi encontrado no banco. Registre agora a conta mestre (Técnico/Administrador) para gerenciar o sistema.
+      </p>
+
+      <form onsubmit="cadastrarPrimeiroAdmin(event)">
+        <div class="form-group">
+          <label for="primeiroAdminNome">Seu Nome Completo *</label>
+          <input type="text" id="primeiroAdminNome" class="form-control" required placeholder="Ex: Administrador do Sistema">
+        </div>
+
+        <div class="form-group" style="margin-top:12px;">
+          <label for="primeiroAdminEmail">E-mail *</label>
+          <input type="email" id="primeiroAdminEmail" class="form-control" required placeholder="admin@escola.com">
+        </div>
+
+        <div class="form-group" style="margin-top:12px;">
+          <label for="primeiroAdminSenha">Senha Mestre *</label>
+          <input type="password" id="primeiroAdminSenha" class="form-control" required minlength="6" placeholder="Mínimo 6 caracteres">
+        </div>
+
+        <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:20px;">
+          <button type="button" class="btn-secundario" onclick="$('modalPrimeiroAdmin').style.display='none'">Cancelar</button>
+          <button type="submit" class="btn-primario">Criar Conta Mestre</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: CONFIGURAÇÃO RÁPIDA DE CONEXÃO SUPABASE NA TELA DE LOGIN -->
+  <div class="modal-overlay" id="modalConfigRapido">
+    <div class="modal-content" style="max-width:500px; text-align:left;">
+      <h3 style="margin-bottom:8px;">⚙️ Conexão com o Supabase</h3>
+      <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom:16px;">
+        Insira as credenciais do seu projeto Supabase para habilitar o login e banco de dados.
+      </p>
+
+      <form onsubmit="salvarConfigRapido(event)">
+        <div class="form-group">
+          <label for="cfgRapidoUrl">Project URL</label>
+          <input type="text" id="cfgRapidoUrl" class="form-control" required placeholder="https://xyzcompany.supabase.co">
+        </div>
+
+        <div class="form-group" style="margin-top:12px;">
+          <label for="cfgRapidoKey">Public Anon Key</label>
+          <input type="password" id="cfgRapidoKey" class="form-control" required placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...">
+        </div>
+
+        <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:20px;">
+          <button type="button" class="btn-secundario" onclick="$('modalConfigRapido').style.display='none'">Fechar</button>
+          <button type="submit" class="btn-primario">Salvar e Conectar</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: TIRAR FOTO COM WEBCAM -->
   <div class="modal-overlay" id="modalCamera">
     <div class="modal-content">
       <h3 style="margin-bottom:12px;">📷 Tirar Foto do Aluno</h3>

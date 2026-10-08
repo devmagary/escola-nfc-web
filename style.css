@@ -541,7 +541,7 @@ th {
   display: none;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: 3000;
 }
 
 .modal-content {
@@ -584,3 +584,165 @@ th {
 #toast.show { opacity: 1; }
 #toast.ok { background-color: #065f46; color: #fff; }
 #toast.err { background-color: #991b1b; color: #fff; }
+
+/* =====================================================================
+   TELA DE AUTENTICAÇÃO / LOGIN
+   ===================================================================== */
+.auth-wrapper {
+  position: fixed;
+  inset: 0;
+  background-color: var(--bg-main);
+  background-image: radial-gradient(circle at 50% 20%, #1e293b 0%, #0a0f1d 70%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 2000;
+}
+
+.auth-card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 20px;
+  padding: 36px;
+  max-width: 440px;
+  width: 100%;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+  text-align: center;
+}
+
+.auth-logo {
+  font-size: 3rem;
+  margin-bottom: 8px;
+}
+
+.auth-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #fff;
+  margin-bottom: 6px;
+}
+
+.auth-subtitle {
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  margin-bottom: 24px;
+}
+
+.auth-form {
+  text-align: left;
+}
+
+.auth-extra-links {
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 0.82rem;
+}
+
+.auth-extra-links a {
+  color: var(--primary);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.auth-extra-links a:hover {
+  text-decoration: underline;
+}
+
+/* Menu de Usuário no Header */
+.user-menu {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.user-profile-badge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background-color: #080d18;
+  border: 1px solid var(--border-color);
+  padding: 4px 12px;
+  border-radius: 999px;
+}
+
+.user-avatar-circle {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.8rem;
+}
+
+.user-info-text {
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  line-height: 1.1;
+}
+
+.user-nome-topo {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #fff;
+}
+
+/* Badges de Cargos */
+.badge-cargo {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cargo-admin       { background-color: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+.cargo-direcao     { background-color: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
+.cargo-coordenacao { background-color: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+.cargo-secretaria  { background-color: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+.cargo-portaria    { background-color: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+
+/* Status Pill */
+.status-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.status-pill.ativo   { background-color: var(--success-bg); color: var(--success); }
+.status-pill.bloqueado { background-color: var(--danger-bg); color: var(--danger); }
+
+.btn-logout {
+  background-color: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-logout:hover {
+  background-color: var(--danger-bg);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
