@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sistema de Acesso Escolar NFC</title>
+  <link rel="stylesheet" href="style.css">
+  <!-- Biblioteca Oficial do Supabase via CDN (dispensa compilações complexas) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+
+  <!-- CABEÇALHO SUPERIOR -->
+  <header>
+    <div class="logo">
+      <span>🎓</span>
+      <span>Acesso Escolar NFC</span>
+    </div>
+
+    <!-- Abas de Navegação -->
+    <nav class="nav-tabs">
+      <button class="nav-btn active" onclick="trocarAba('portaria')">
+        <span>🏢</span> Portaria
+      </button>
+      <button class="nav-btn" onclick="trocarAba('secretaria')">
+        <span>📝</span> Secretaria
+      </button>
+      <button class="nav-btn" onclick="trocarAba('config')">
+        <span>⚙️</span> Configurações
+      </button>
+    </nav>
+
+    <!-- Indicadores de Status -->
+    <div class="status-badges">
+      <div class="badge-status" id="badgeEsp">
+        <span class="dot" id="dotEsp"></span>
+        <span>ESP32: <strong id="txtStatusEsp">Buscando...</strong></span>
+      </div>
+      <div class="badge-status" id="badgeSupabase">
+        <span class="dot" id="dotSupabase"></span>
+        <span>Nuvem: <strong id="txtStatusSupabase">Configurar</strong></span>
+      </div>
+    </div>
+  </header>
+
+  <!-- CONTEÚDO PRINCIPAL -->
+  <main>
+
+    <!-- ===================================================================
+         ABA 1: PORTARIA EM TEMPO REAL (TOTEM DO PORTEIRO)
+         =================================================================== -->
+    <section id="aba-portaria" class="tab-pane active">
+      <div class="portaria-grid">
+        
+        <!-- Cartão Grande do Aluno Detectado -->
+        <div class="card-totem" id="cardTotem">
+          <div class="foto-wrapper">
+            <img id="totemFoto" class="foto-aluno-grande" src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=500&auto=format&fit=crop&q=80" alt="Foto do Aluno">
+          </div>
+
+          <h2 class="aluno-nome" id="totemNome">Aguardando Aproximação...</h2>
+          
+          <div class="tag-status-acesso status-liberado" id="totemStatusBadge">
+            AGUARDANDO CARTÃO
+          </div>
+
+          <div class="aluno-detalhes">
+            <div class="detalhe-item">
+              <div class="label">Matrícula</div>
+              <div class="valor" id="totemMatricula">—</div>
+            </div>
+            <div class="detalhe-item">
+              <div class="label">Turma</div>
+              <div class="valor" id="totemTurma">—</div>
+            </div>
+            <div class="detalhe-item">
+              <div class="label">Curso</div>
+              <div class="valor" id="totemCurso">—</div>
+            </div>
+            <div class="detalhe-item">
+              <div class="label">Responsável</div>
+              <div class="valor" id="totemResponsavel">—</div>
+            </div>
+          </div>
+
+          <!-- Botão WhatsApp com Link Direto -->
+          <a id="btnWhatsapp" href="#" target="_blank" class="btn-whatsapp" style="display:none;">
+            <span>💬</span> Falar com Responsável no WhatsApp
+          </a>
+        </div>
+
+        <!-- Painel Lateral: Últimas Entradas do Dia -->
+        <div class="painel-lateral">
+          <h3><span>🕒</span> Últimos Acessos Hoje</h3>
+          <ul class="lista-recentes" id="listaRecentes">
+            <li class="recente-item" style="color:var(--text-muted); justify-content:center; padding:30px 10px;">
+              Nenhum acesso registrado ainda.
+            </li>
+          </ul>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ===================================================================
+         ABA 2: SECRETARIA (CADASTRO E GESTÃO DE ALUNOS)
+         =================================================================== -->
+    <section id="aba-secretaria" class="tab-pane">
+      <div class="secretaria-layout">
+        
+        <!-- Formulário de Cadastro / Edição -->
+        <div class="card-form">
+          <h2 class="form-title" id="tituloFormAluno">➕ Cadastrar Aluno</h2>
+
+          <form id="formAluno" onsubmit="salvarAluno(event)">
+            
+            <!-- Foto com Upload ou Câmera -->
+            <div class="foto-upload-box">
+              <div class="foto-preview-container">
+                <img id="previewFotoForm" class="foto-preview" src="https://via.placeholder.com/150/1e293b/94a3b8?text=Sem+Foto" alt="Prévia">
+              </div>
+              <div class="foto-acoes-botoes">
+                <button type="button" class="btn-secundario" onclick="$('inputArquivoFoto').click()">
+                  📁 Escolher Arquivo
+                </button>
+                <button type="button" class="btn-secundario" onclick="abrirModalCamera()">
+                  📷 Tirar Foto (Webcam)
+                </button>
+                <input type="file" id="inputArquivoFoto" accept="image/*" style="display:none" onchange="processarArquivoFoto(event)">
+              </div>
+              <small style="color:var(--text-muted); display:block; margin-top:8px; font-size:0.75rem;">
+                A foto é reduzida e otimizada automaticamente para ~40 KB.
+              </small>
+            </div>
+
+            <div class="form-group">
+              <label for="campoNome">Nome Completo do Aluno *</label>
+              <input type="text" id="campoNome" class="form-control" required placeholder="Ex: Maria Clara Souza">
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="campoMatricula">Matrícula</label>
+                <input type="text" id="campoMatricula" class="form-control" placeholder="Ex: 20241002">
+              </div>
+              <div class="form-group">
+                <label for="campoTurma">Turma *</label>
+                <input type="text" id="campoTurma" class="form-control" required placeholder="Ex: Informática 2">
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="campoCurso">Curso</label>
+              <input type="text" id="campoCurso" class="form-control" placeholder="Ex: Técnico em Informática">
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="campoResponsavel">Nome do Responsável</label>
+                <input type="text" id="campoResponsavel" class="form-control" placeholder="Ex: Carlos Roberto Souza">
+              </div>
+              <div class="form-group">
+                <label for="campoTelefone">WhatsApp do Responsável</label>
+                <input type="text" id="campoTelefone" class="form-control" placeholder="Ex: 84998765432">
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="campoUid">Cartão NFC (UID Hexadecimal) *</label>
+              <div style="display:flex; gap:8px;">
+                <input type="text" id="campoUid" class="form-control" required placeholder="Ex: 2C:9D:7E:8E" style="font-family:monospace;">
+                <button type="button" class="btn-secundario" onclick="capturarUidDoEsp()" title="Puxa o último cartão lido no ESP32">
+                  📡 Puxar do Leitor
+                </button>
+              </div>
+            </div>
+
+            <div class="form-group" style="margin-top:10px;">
+              <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                <input type="checkbox" id="campoAtivo" checked style="width:18px; height:18px;">
+                <span>Permissão de Acesso Ativa (Liberado para entrar)</span>
+              </label>
+            </div>
+
+            <div style="display:flex; gap:10px; margin-top:20px;">
+              <button type="submit" class="btn-primario" id="btnSalvarAluno">Salvar Aluno</button>
+              <button type="button" class="btn-secundario" id="btnCancelarEdicao" onclick="limparFormularioAluno()" style="display:none;">Cancelar</button>
+            </div>
+          </form>
+        </div>
+
+        <!-- Tabela de Alunos Cadastrados -->
+        <div class="card-tabela">
+          <div class="tabela-topo">
+            <h3 style="display:flex; align-items:center; gap:8px;">
+              <span>👥</span> Alunos Cadastrados (<span id="contagemAlunos">0</span>)
+            </h3>
+            <input type="search" id="buscaAlunos" class="form-control" placeholder="🔍 Buscar aluno, matrícula ou UID..." style="max-width:260px;" oninput="filtrarTabelaAlunos()">
+          </div>
+
+          <div style="overflow-x:auto;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Aluno</th>
+                  <th>Turma / Curso</th>
+                  <th>WhatsApp</th>
+                  <th>Cartão NFC</th>
+                  <th style="text-align:right;">Ações</th>
+                </tr>
+              </thead>
+              <tbody id="corpoTabelaAlunos">
+                <tr><td colspan="5" style="text-align:center; padding:30px; color:var(--text-muted);">Carregando alunos...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ===================================================================
+         ABA 3: CONFIGURAÇÕES (SUPABASE E ESP32)
+         =================================================================== -->
+    <section id="aba-config" class="tab-pane">
+      <div class="card-form" style="max-width:680px; margin:0 auto;">
+        <h2 class="form-title">⚙️ Configurações da Nuvem e Conexão</h2>
+        
+        <p style="color:var(--text-muted); font-size:0.9rem; margin-bottom:20px;">
+          Estas configurações ficam salvas no seu navegador. Você só precisa preencher uma vez.
+        </p>
+
+        <div class="form-group">
+          <label for="cfgSupabaseUrl">URL do Projeto no Supabase (Project URL)</label>
+          <input type="text" id="cfgSupabaseUrl" class="form-control" placeholder="https://xyzcompany.supabase.co">
+        </div>
+
+        <div class="form-group">
+          <label for="cfgSupabaseKey">Chave Pública Anônima do Supabase (anon key)</label>
+          <input type="password" id="cfgSupabaseKey" class="form-control" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...">
+        </div>
+
+        <div class="form-group">
+          <label for="cfgEspUrl">Endereço IP ou Host do ESP32-S3</label>
+          <input type="text" id="cfgEspUrl" class="form-control" placeholder="http://nfc.local ou http://192.168.1.150">
+          <small style="color:var(--text-muted); font-size:0.75rem;">
+            O endereço que aparece no Monitor Serial quando o ESP32 conecta no Wi-Fi.
+          </small>
+        </div>
+
+        <div style="display:flex; gap:12px; margin-top:24px;">
+          <button type="button" class="btn-primario" onclick="salvarConfiguracoes()">Salvar Configurações</button>
+          <button type="button" class="btn-secundario" onclick="testarConexoes()">Testar Conexões</button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- MODAL PARA TIRAR FOTO COM A WEBCAM -->
+  <div class="modal-overlay" id="modalCamera">
+    <div class="modal-content">
+      <h3 style="margin-bottom:12px;">📷 Tirar Foto do Aluno</h3>
+      <video id="videoWebcam" class="video-camera" autoplay playsinline></video>
+      <div style="display:flex; gap:12px; justify-content:center;">
+        <button type="button" class="btn-primario" onclick="capturarFotoWebcam()">📸 Capturar Foto</button>
+        <button type="button" class="btn-secundario" onclick="fecharModalCamera()">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Elemento invisível para redimensionamento e compressão da foto -->
+  <canvas id="canvasCompressor" style="display:none;"></canvas>
+
+  <div id="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
