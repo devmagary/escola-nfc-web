@@ -1,67 +1,108 @@
-# Como Configurar o Supabase e Publicar na Vercel (Passo a Passo)
+# Manual do Sistema de Acesso Escolar NFC (Web & Nuvem)
 
-Este guia explica como colocar a sua plataforma escolar no ar em **menos de 10 minutos**, usando as contas **gratuitas** do Supabase e da Vercel.
+Este guia explica como configurar o banco de dados Supabase, gerenciar usuários e permissões (RBAC), sincronizar alunos com o ESP32 e publicar o sistema.
 
 ---
 
-## 1. Passo 1: Criar o Banco e o Cofre de Fotos no Supabase (Grátis)
+## 1. Passo 1: Criar o Banco e Permissões no Supabase (Grátis)
 
-O **Supabase** é o local onde ficarão guardados os cadastros dos alunos e as fotos 3x4.
+O **Supabase** é o backend da escola. Ele armazena o cadastro dos alunos, as fotos compactadas, o histórico de entradas e os perfis dos funcionários com níveis de acesso.
 
-1. Acesse **[supabase.com](https://supabase.com)** e crie uma conta gratuita (pode entrar com o seu GitHub ou Google).
+1. Acesse **[supabase.com](https://supabase.com)** e faça login na sua conta gratuita.
 2. Clique em **"New Project"** (Novo Projeto).
-3. Dê um nome ao projeto (ex: `escola-nfc`) e defina uma senha para o banco de dados.
-4. Escolha a região mais próxima (ex: `South America (São Paulo)`).
-5. Aguarde cerca de 1 minuto enquanto o Supabase prepara o servidor.
+3. Defina o nome do projeto (ex: `escola-nfc`), crie uma senha forte e escolha a região `South America (São Paulo)`.
+4. Aguarde cerca de 1 minuto enquanto o banco é provisionado.
 
-### Criando as Tabelas e o Cofre de Imagens com 1 Clique:
-1. No menu lateral esquerdo do Supabase, clique no ícone **SQL Editor** (parece um terminal com `>_`).
+### Executando o Script Oficial com 1 Clique:
+1. No menu lateral do Supabase, clique no ícone **SQL Editor** (`>_`).
 2. Abra o arquivo **`supabase_setup.sql`** que está nesta pasta.
-3. Copie todo o conteúdo dele e cole dentro da caixa de texto do SQL Editor do Supabase.
-4. Clique no botão verde **"Run"** (no canto inferior direito).
-5. **Pronto!** Automaticamente ele cria:
-   * A tabela `alunos` (com nome, turma, curso, pais, etc).
-   * A tabela `historico_acessos`.
-   * O cofre de fotos `fotos-alunos` (com permissão de leitura pública).
-   * Um aluno de teste inicial com o cartão `2C:9D:7E:8E`.
+3. Copie todo o conteúdo e cole na caixa de texto do editor SQL.
+4. Clique no botão verde **"Run"**.
+5. **Pronto!** O script configurará automaticamente:
+   * **Tabela `alunos`:** com políticas de segurança RLS (leitura pela portaria, edição pela secretaria e admin).
+   * **Tabela `perfis_usuarios`:** com os cargos institucionais (admin, direção, coordenação, secretaria e portaria).
+   * **Tabela `historico_acessos`:** registro das passagens com data e hora.
+   * **Cofre de Imagens `fotos-alunos`:** bucket público para fotos 3x4 compactadas.
+   * **Funções RPC de Administração:** cadastro de primeiro administrador, alteração de cargos e redefinição de senhas.
 
-### Pegando as suas 2 Chaves de Conexão:
-1. No menu lateral esquerdo, clique no ícone de engrenagem **Project Settings** -> **API**.
-2. Copie:
-   * **Project URL** (algo como: `https://abcdefghijk.supabase.co`)
-   * **anon public key** (uma chave longa começando com `eyJhbGci...`)
-
----
-
-## 2. Passo 2: Testar Localmente no seu Computador
-
-Você não precisa nem subir na internet agora se não quiser; pode testar agora mesmo:
-1. Abra a pasta `escola-nfc-web` no seu computador.
-2. Dê dois cliques no arquivo **`index.html`** (ele vai abrir no Chrome, Edge ou Firefox).
-3. Vá na aba **⚙️ Configurações**:
-   * Cole a sua **Project URL** e a sua **anon key** do Supabase.
-   * No campo do ESP32, coloque o IP que aparece no Monitor Serial (ex: `http://192.168.1.150` ou `http://nfc.local`).
-   * Clique em **"Salvar Configurações"** e depois em **"Testar Conexões"**.
-4. Vá na aba **📝 Secretaria**: você já verá o aluno de teste listado! Pode adicionar fotos, editar e cadastrar novos alunos.
-5. Vá na aba **🏢 Portaria**: encoste o cartão no seu leitor PN532 do ESP32 e veja a foto aparecer na tela com som de confirmação!
+### Pegando as Chaves de Conexão:
+1. Vá em **Project Settings** (ícone de engrenagem) -> **API**.
+2. Copie os dois valores:
+   * **Project URL** (ex: `https://abcdefghijk.supabase.co`)
+   * **anon public key** (chave longa começando com `eyJhbGci...`)
 
 ---
 
-## 3. Passo 3: Publicar na Vercel (Para acessar de qualquer lugar)
+## 2. Passo 2: Primeiro Acesso e Administrador Mestre
 
-Para que a secretária e o porteiro possam abrir o sistema em qualquer tablet ou celular:
+Ao abrir o sistema pela primeira vez:
 
-### Opção Rápida (Via GitHub + Vercel):
-1. Suba esta pasta `escola-nfc-web` para um repositório no seu GitHub.
-2. Acesse **[vercel.com](https://vercel.com)** e entre com a sua conta GitHub.
-3. Clique em **"Add New..."** -> **"Project"**.
-4. Selecione o repositório do seu GitHub e clique em **"Deploy"**.
-5. Em cerca de 20 segundos, a Vercel gerará um link público seguro (ex: `https://escola-nfc.vercel.app`).
-6. Abra o link no tablet ou computador da portaria, preencha as configurações uma única vez e o sistema está pronto para uso oficial!
+1. Se as chaves do Supabase ainda não estiverem gravadas no navegador, clique no link **"⚙️ Configurar URL e Chaves do Supabase"** e salve as credenciais.
+2. O sistema detectará automaticamente que o banco de dados está virgem e exibirá o botão:
+   * **👤 Cadastrar 1º Administrador do Sistema**
+3. Clique nele, digite seu nome completo, e-mail institucional e uma senha segura (mínimo 6 caracteres).
+4. O usuário mestre (**Técnico/Administrador**) será registrado e você entrará diretamente no painel completo!
 
 ---
 
-## 4. O que a Secretaria e o Porteiro ganham:
-* **Secretária:** Adiciona a foto do aluno arrastando do computador ou tirando direto da webcam com 1 clique (o sistema reduz o tamanho da foto sozinho para 40 KB).
-* **Porteiro:** Ao passar a carteirinha, vê a foto grande do aluno, a turma e tem um botão verde para mandar mensagem no WhatsApp dos pais na hora!
-* **Escola:** Se faltar internet, o ESP32 continua destravando o portão normalmente no modo offline.
+## 3. Passo 3: Perfis de Usuários e Permissões (RBAC)
+
+O sistema conta com **5 níveis de privilégios** institucionais:
+
+| Nível / Cargo | Aba Portaria | Aba Secretaria | Aba Usuários | Aba Configurações | Descrição das Permissões |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| 🛠️ **Técnico / Admin** | ✔️ | ✔️ | ✔️ | ✔️ | **Controle Total:** Cria e desativa usuários, redefine senhas, exclui dados e altera configurações. |
+| 🏛️ **Direção Escolar** | ✔️ | ✔️ | ❌ | ❌ | **Visão Geral:** Bloqueia/libera alunos, visualiza relatórios e acessa a secretaria. |
+| 📚 **Coordenação** | ✔️ | ✔️ | ❌ | ❌ | **Consulta e Acompanhamento:** Consulta fichas de alunos, turmas e históricos. |
+| 📝 **Secretaria** | ✔️ | ✔️ | ❌ | ❌ | **Cadastros:** Adiciona novos alunos, tira fotos via webcam/upload e atribui cartões NFC. |
+| 🏢 **Portaria** | ✔️ | ❌ | ❌ | ❌ | **Totem Operacional:** Focado 100% na exibição em tempo real de quem passou na catraca/portão. |
+
+### Como o Administrador cadastra novos funcionários:
+1. Vá na aba **👥 Usuários** (visível apenas para Administradores).
+2. Clique em **➕ Novo Usuário**.
+3. Preencha o nome, e-mail institucional, senha inicial e selecione o cargo correspondente.
+4. O novo funcionário poderá logar com a conta dele e verá apenas as abas do seu respectivo cargo!
+
+---
+
+## 4. Passo 4: Sincronização com o ESP32 e Modo Offline
+
+Para garantir que a porta ou catraca continue funcionando **mesmo se faltar internet**, o sistema sincroniza a memória do navegador com o microcontrolador ESP32-S3:
+
+### 4.1. Sincronização Instantânea em Tempo Real
+* Ao clicar em **"Bloquear"** ou **"Liberar"** um aluno na Secretaria, o site atualiza o Supabase e dispara na hora o novo status para a Flash do ESP32 (`POST /api/sincronizar_aluno`).
+* Ao cadastrar um novo aluno ou editar sua tag NFC, o ESP32 é atualizado instantaneamente.
+* Ao excluir um aluno, o cartão é removido da memória do ESP32.
+
+### 4.2. Sincronização Completa em Lote (Botão Novo)
+* Na aba **Secretaria** (ao lado do contador de alunos) ou na aba **Configurações**, clique em:
+  * **`🔄 Sincronizar com ESP32`**
+* O sistema baixa todos os alunos cadastrados no Supabase e grava a lista completa na Flash do ESP32 (`cartoes.json`) em uma única operação.
+
+### 4.3. Atalho Rápido de IP no Cabeçalho
+* No canto superior direito, clique diretamente no selo **`• ESP32: Online`**.
+* Uma caixinha se abrirá para você conferir ou atualizar o IP do ESP32 na hora (ex: `http://192.168.0.73`), sem precisar ir até as Configurações.
+
+---
+
+## 5. Passo 5: Como Operar o Totem da Portaria (Atenção ao HTTPS)
+
+* **No Computador / Tablet da Portaria (Recomendado):**
+  * Para se comunicar com o leitor físico via rede local (`http://192.168.0.73`), a tela da portaria deve rodar em protocolo HTTP (ex: `http://localhost:5500` via Live Server do VS Code ou servidor local).
+  * **Por que?** Navegadores modernos em **HTTPS** (como `https://escola-nfc.vercel.app`) bloqueiam requisições a IPs locais em HTTP (*Mixed Content / Private Network Access*). O sistema avisa com o selo **`Bloq. HTTPS`** caso você tente conectar ao IP local a partir de uma página pública HTTPS.
+* **Acessos Remotos (Direção / Secretaria de Casa):**
+  * Podem usar o link da **Vercel** normalmente para cadastrar alunos, conferir relatórios e gerenciar usuários de qualquer lugar do mundo.
+
+---
+
+## 6. Publicação na Vercel (Para Acesso Externo)
+
+1. Faça o commit e envie os arquivos para o repositório no seu GitHub:
+   ```bash
+   git add .
+   git commit -m "Deploy: Painel Escolar com RBAC e Sincronização ESP32"
+   git push origin main
+   ```
+2. No painel da **[vercel.com](https://vercel.com)**, importe o repositório `escola-nfc-web`.
+3. Clique em **Deploy**.
+4. Em instantes, o link público seguro estará no ar!
