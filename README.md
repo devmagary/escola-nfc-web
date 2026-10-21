@@ -11,3 +11,14 @@ Sistema moderno e completo de controle de acesso escolar e empresarial integrado
 
 ## 📖 Documentação Completa
 Consulte o [Manual de Configuração e Publicação](COMO_CONFIGURAR_E_PUBLICAR.md) para o passo a passo detalhado de implantação no Supabase e na Vercel.
+
+## 🔌 Firmware do ESP32-S3
+
+O código-fonte do controlador de acesso fica em [`esp32s3-nfc-acesso/`](esp32s3-nfc-acesso/):
+
+* **`esp32s3-nfc-acesso.ino`** — firmware (NFC, Wi-Fi, API REST, console web e OTA).
+* **`pagina_web.h`**, **`pagina_wifi.h`**, **`web_ferramentas.h`** — interfaces web embarcadas.
+* **`MANUAL_DO_SISTEMA.md`** — montagem, gravação, operação e sincronização com o Supabase.
+* Guias de pinagem e de sensores extras.
+
+> Antes de gravar, preencha `WIFI_SSID`/`WIFI_SENHA` (rede **2,4 GHz**) e troque as senhas padrão do painel e do AP. O ESP32-S3 não possui rádio de 5 GHz.
