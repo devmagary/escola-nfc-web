@@ -1,0 +1,14 @@
+# Arquivos que não precisam ser publicados no site estático.
+# O build da Vercel continua usando package.json e scripts/build-config.mjs.
+tests/
+supabase/
+supabase_setup.sql
+docs/
+.github/
+esp32s3-nfc-acesso/
+README.md
+COMO_CONFIGURAR_E_PUBLICAR.md
+.env
+.env.*
+.vercel/
+/config.js

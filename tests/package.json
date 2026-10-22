@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "description": "Testes do escola-nfc-web. O main existe para compatibilizar `node --test tests/` no Node 24+, que não aceita mais diretórios como argumento do runner."
+}

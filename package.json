@@ -1,0 +1,28 @@
+{
+  "name": "escola-nfc-web",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Controle de acesso escolar NFC: painel web (Vercel + Supabase), totem da portaria e ferramentas locais.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build-config.mjs",
+    "dev": "node scripts/build-config.mjs && node scripts/serve-local.mjs",
+    "totem": "node scripts/serve-local.mjs",
+    "serve": "node scripts/serve-local.mjs",
+    "mock": "node scripts/mock-esp.mjs",
+    "admin": "node scripts/bootstrap-admin.mjs",
+    "test": "node --test tests/",
+    "check": "node scripts/check-syntax.mjs"
+  },
+  "keywords": [
+    "nfc",
+    "esp32",
+    "supabase",
+    "controle-de-acesso",
+    "escola"
+  ],
+  "license": "UNLICENSED"
+}

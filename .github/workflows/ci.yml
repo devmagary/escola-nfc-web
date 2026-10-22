@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  testes:
+    name: Testes e verificação de sintaxe
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Não há dependências de runtime (sem package-lock): não é preciso npm ci.
+      - name: Executar testes (node --test)
+        run: npm test
+
+      - name: Verificar sintaxe (js/ e scripts/)
+        run: npm run check

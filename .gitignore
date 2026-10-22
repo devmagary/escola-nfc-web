@@ -8,12 +8,16 @@ dist/
 out/
 build/
 
-# Variáveis de ambiente e chaves locais
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+# Configuração gerada em tempo de build (scripts/build-config.mjs)
+# Apenas o config.js da RAIZ é gerado; js/lib/config.js é código-fonte.
+/config.js
+
+# Variáveis de ambiente e chaves locais (mantém apenas o modelo)
+.env*
+!.env.example
+
+# Vercel CLI (projeto/org locais)
+.vercel/
 
 # Logs e arquivos de sistema
 *.log
