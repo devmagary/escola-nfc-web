@@ -81,6 +81,10 @@ const state = {
   timerFila: null,
   timerRelogio: null,
   timerRecentes: null,
+  timerHistorico: null,
+  historicoAtualizadoEm: null,
+  carregandoHistorico: false,
+  historicoReq: 0,
   canalRealtime: null,
   processandoCartao: false,
   cartaoPendente: null,
@@ -353,6 +357,10 @@ function estadoDeslogado() {
     clearInterval(state.timerRecentes);
     state.timerRecentes = null;
   }
+  if (state.timerHistorico) {
+    clearInterval(state.timerHistorico);
+    state.timerHistorico = null;
+  }
   state.usuario = null;
   state.perfil = null;
   state.alunos = [];
@@ -486,6 +494,15 @@ function iniciarServicosDaSessao() {
   state.timerRecentes = setInterval(() => {
     if (state.abaAtual === 'portaria' && state.usuario) carregarRecentesHoje();
   }, 30000);
+
+  // Acompanhamento remoto: a direção pode deixar a aba Histórico aberta no
+  // Vercel e receber atualizações mesmo se o Realtime não estiver publicado.
+  if (state.timerHistorico) clearInterval(state.timerHistorico);
+  state.timerHistorico = setInterval(() => {
+    if (state.abaAtual === 'historico' && state.usuario && !document.hidden) {
+      carregarHistorico(state.historico.page, { silencioso: true });
+    }
+  }, 10000);
 
   sincronizarFilaHistorico();
 
@@ -715,7 +732,16 @@ async function processarCartao(uid) {
     if (agora - ultimo < 2500) return;
     state.ultimoProcessamento.set(normalizado, agora);
 
-    const aluno = await Supabase.buscarAlunoPorUid(normalizado);
+    let aluno = null;
+    try {
+      aluno = await Supabase.buscarAlunoPorUid(normalizado);
+    } catch (erroConsulta) {
+      // Sem internet, usa a base já carregada/cacheada neste dispositivo.
+      const doCache = state.alunos.find((a) => normalizarUid(a.uid_nfc) === normalizado);
+      if (!doCache) throw erroConsulta;
+      aluno = doCache;
+      toast('Nuvem indisponível. Exibindo dados da base local em cache.', 'err');
+    }
     const momento = new Date();
     const evento = {
       id: gerarId(),
@@ -944,11 +970,21 @@ function aoNovoEventoHistorico(evento) {
 // =====================================================================
 
 const CHAVE_FILA = 'fila_historico_v1';
+const CHAVE_CACHE_ALUNOS = 'cache_alunos_v1';
 
 function carregarFilaHistorico() {
   try {
     const bruto = JSON.parse(lerStorage(CHAVE_FILA, '[]'));
-    return Array.isArray(bruto) ? bruto.slice(-200) : [];
+    if (!Array.isArray(bruto)) return [];
+    // A fila guarda apenas acessos de alunos identificados. Eventos antigos de
+    // cartão desconhecido (aluno_id ausente/nulo) não devem ocupar a fila.
+    const filtrados = bruto
+      .filter((evento) => evento && evento.aluno_id)
+      .slice(-200);
+    if (filtrados.length !== bruto.length) {
+      salvarStorage(CHAVE_FILA, JSON.stringify(filtrados));
+    }
+    return filtrados;
   } catch (_) {
     return [];
   }
@@ -973,6 +1009,12 @@ function registrarEventoHistorico(evento) {
     atualizarKpis(evento);
   }
   Supabase.inserirHistorico(evento).catch((erro) => {
+    // Tentativas de cartão não cadastrado não são acessos de aluno e não
+    // devem ocupar a fila de sincronização (qualquer tag NFC as geraria).
+    if (!evento.aluno_id) {
+      console.warn('[historico] tentativa de cartão não cadastrado não será enfileirada', erro);
+      return;
+    }
     console.warn('[historico] salvando na fila local', erro);
     state.filaHistorico.push(evento);
     persistirFilaHistorico();
@@ -985,6 +1027,12 @@ async function sincronizarFilaHistorico() {
   const pendentes = [...state.filaHistorico];
   const restantes = [];
   for (const evento of pendentes) {
+    if (!evento.aluno_id) {
+      // Eventos antigos de cartão desconhecido: tenta enviar uma vez, mas não
+      // mantém para sempre na fila.
+      try { await Supabase.inserirHistorico(evento); } catch (_) { /* descarta */ }
+      continue;
+    }
     try {
       await Supabase.inserirHistorico(evento);
     } catch (_) {
@@ -1116,10 +1164,29 @@ async function carregarAlunos() {
   if (corpo) corpo.innerHTML = '<tr><td colspan="5" class="celula-vazia">Carregando alunos...</td></tr>';
   try {
     state.alunos = await Supabase.listarAlunos();
+    try {
+      salvarStorage(CHAVE_CACHE_ALUNOS, JSON.stringify(state.alunos));
+    } catch (_) { /* cache local é opcional */ }
     renderizarTabelaAlunos();
     atualizarKpis();
   } catch (erro) {
     console.error('[alunos]', erro);
+    // Sem internet, a portaria ainda consegue identificar cartões já vistos
+    // nesta máquina usando a última base carregada.
+    let cache = null;
+    try {
+      const bruto = lerStorage(CHAVE_CACHE_ALUNOS, '');
+      if (bruto) cache = JSON.parse(bruto);
+    } catch (_) { cache = null; }
+
+    if (Array.isArray(cache) && cache.length > 0) {
+      state.alunos = cache;
+      renderizarTabelaAlunos();
+      atualizarKpis();
+      toast('Nuvem indisponível. Usando a última base de alunos salva neste dispositivo.', 'err');
+      return;
+    }
+
     toast(mensagemErro(erro), 'err');
     if (corpo) corpo.innerHTML = `<tr><td colspan="5" class="celula-vazia">Falha ao carregar alunos: ${escapeHtml(mensagemErro(erro))}</td></tr>`;
   } finally {
@@ -1578,6 +1645,10 @@ function baixarModeloCsv() {
 }
 
 function exportarAlunosCsv() {
+  if (state.alunos.length === 0) {
+    toast('Nenhum aluno cadastrado para exportar.', 'err');
+    return;
+  }
   const cabecalho = ['nome_completo', 'matricula', 'turma', 'curso', 'nome_responsavel', 'telefone_responsavel', 'uid_nfc', 'ativo', 'foto_url'];
   const linhas = state.alunos.map((a) => [
     a.nome_completo, a.matricula || '', a.turma, a.curso || '', a.nome_responsavel || '',
@@ -1761,8 +1832,11 @@ function lerFiltrosHistorico() {
   };
 }
 
-async function carregarHistorico(page = 0) {
+async function carregarHistorico(page = 0, { silencioso = false } = {}) {
   if (!state.perfil?.verHistorico) return;
+  if (state.carregandoHistorico && silencioso) return;
+  const requisicao = ++state.historicoReq;
+  state.carregandoHistorico = true;
   const hoje = dataParaInput();
   if ($('histDataInicio') && !$('histDataInicio').value) $('histDataInicio').value = hoje;
   if ($('histDataFim') && !$('histDataFim').value) $('histDataFim').value = hoje;
@@ -1770,7 +1844,7 @@ async function carregarHistorico(page = 0) {
   state.historico.filtros = filtros;
   state.historico.page = Math.max(0, page);
   const corpo = $('corpoTabelaHistorico');
-  if (corpo) corpo.innerHTML = '<tr><td colspan="6" class="celula-vazia">Carregando histórico...</td></tr>';
+  if (corpo && !silencioso) corpo.innerHTML = '<tr><td colspan="6" class="celula-vazia">Carregando histórico...</td></tr>';
 
   try {
     const { rows, total } = await Supabase.listarHistorico({
@@ -1778,13 +1852,19 @@ async function carregarHistorico(page = 0) {
       page: state.historico.page,
       pageSize: state.historico.pageSize
     });
+    if (requisicao !== state.historicoReq) return;
     state.historico.rows = rows;
     state.historico.total = total;
+    state.historicoAtualizadoEm = new Date();
     renderizarHistorico();
   } catch (erro) {
     console.error('[histórico]', erro);
-    toast(mensagemErro(erro), 'err');
-    if (corpo) corpo.innerHTML = `<tr><td colspan="6" class="celula-vazia">Falha ao carregar: ${escapeHtml(mensagemErro(erro))}</td></tr>`;
+    if (requisicao === state.historicoReq && !silencioso) {
+      toast(mensagemErro(erro), 'err');
+      if (corpo) corpo.innerHTML = `<tr><td colspan="6" class="celula-vazia">Falha ao carregar: ${escapeHtml(mensagemErro(erro))}</td></tr>`;
+    }
+  } finally {
+    if (requisicao === state.historicoReq) state.carregandoHistorico = false;
   }
 }
 
@@ -1831,11 +1911,18 @@ function renderizarHistorico() {
 
   const totalPaginas = Math.max(1, Math.ceil(total / pageSize));
   if ($('histInfoPagina')) $('histInfoPagina').textContent = `Página ${page + 1} de ${totalPaginas}`;
+  if ($('histAtualizadoEm')) {
+    $('histAtualizadoEm').textContent = state.historicoAtualizadoEm
+      ? `Atualizado às ${state.historicoAtualizadoEm.toLocaleTimeString('pt-BR')} · atualização automática`
+      : '';
+  }
   if ($('btnHistAnterior')) $('btnHistAnterior').disabled = page <= 0;
   if ($('btnHistProxima')) $('btnHistProxima').disabled = page + 1 >= totalPaginas;
 }
 
-async function exportarHistorico() {
+async function exportarHistorico(evento) {
+  const botao = evento?.currentTarget || $('btnExportarHistorico');
+  botaoCarregando(botao, true, 'Exportando...');
   try {
     const filtros = lerFiltrosHistorico();
     const rows = [];
@@ -1847,15 +1934,21 @@ async function exportarHistorico() {
       if (resultado.rows.length < tamanhoPagina) break;
       pagina += 1;
     }
+    if (rows.length === 0) {
+      toast('Nenhum acesso encontrado para exportar com esses filtros.', 'err');
+      return;
+    }
     const cabecalho = ['data_hora', 'nome_identificado', 'turma', 'uid_nfc', 'status', 'tipo_evento', 'aluno_id'];
     const linhas = rows.map((r) => [
       formatarDataHora(r.data_hora), r.nome_identificado || '', r.turma || '',
       r.uid_nfc || '', r.status || '', r.tipo_evento || '', r.aluno_id || ''
     ]);
     baixarArquivo(`historico_${dataParaInput()}.csv`, paraCsv(cabecalho, linhas));
-    toast('Histórico exportado.', 'ok');
+    toast(`${rows.length} acesso(s) exportado(s) em CSV.`, 'ok');
   } catch (erro) {
     toast(mensagemErro(erro), 'err');
+  } finally {
+    botaoCarregando(botao, false);
   }
 }
 
@@ -2268,6 +2361,10 @@ async function compararBaseEsp() {
 }
 
 function exportarAlunosJson() {
+  if (state.alunos.length === 0) {
+    toast('Nenhum aluno cadastrado para exportar.', 'err');
+    return;
+  }
   baixarArquivo(`alunos_${dataParaInput()}.json`, JSON.stringify(state.alunos, null, 2), 'application/json');
   toast('Backup JSON exportado.', 'ok');
 }
@@ -2369,6 +2466,7 @@ function ligarEventos() {
   $('btnSyncEspSec')?.addEventListener('click', (evento) => sincronizarTodosAlunos(evento.currentTarget));
 
   $('btnExportarHistorico')?.addEventListener('click', exportarHistorico);
+  $('btnAtualizarHistorico')?.addEventListener('click', () => carregarHistorico(state.historico.page));
   $('btnFiltrarHistorico')?.addEventListener('click', () => carregarHistorico(0));
   $('btnLimparFiltrosHist')?.addEventListener('click', () => {
     if ($('histDataInicio')) $('histDataInicio').value = dataParaInput();

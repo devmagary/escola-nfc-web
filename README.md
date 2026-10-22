@@ -9,7 +9,8 @@ O site **não pede URL nem chave do Supabase em nenhum navegador**. A configura�
 * **Controle de Acesso Baseado em Cargos (RBAC):** 5 cargos institucionais — `admin`, `direcao`, `coordenacao`, `secretaria` e `portaria`. Cada usuário vê apenas as abas e ações do seu cargo.
 * **Portaria/totem em tempo real:** o navegador consulta o leitor (`GET /api/ultimo`), busca o aluno no Supabase e exibe foto, nome, turma, matrícula, curso, responsável e o status **LIBERADO / BLOQUEADO / NÃO CADASTRADO**, com link para notificar o responsável no WhatsApp, som e tela cheia.
 * **Operação offline no ESP32-S3:** o leitor mantém a base de cartões na memória Flash (`cartoes.json`) e continua liberando/bloqueando mesmo sem internet. A sincronização é feita pelo painel (envio imediato ao salvar/bloquear e o botão **Sincronizar base**).
-* **Resiliência do painel:** acessos que não conseguem ser gravados na nuvem ficam numa fila local no navegador (até 200 eventos) e são reenviados quando a conexão volta.
+* **Resiliência do painel:** acessos de alunos identificados que não conseguem ser gravados na nuvem ficam numa fila local no navegador (até 200 eventos) e são reenviados quando a conexão volta. Tentativas de cartão não cadastrado não ocupam essa fila.
+* **Monitoramento remoto:** a portaria grava os acessos no Supabase e a direção acompanha o histórico pelo link da Vercel, com Realtime e atualização automática a cada 10 segundos — sem precisar acessar a rede local.
 * **Secretaria digital:** cadastro de alunos com foto (webcam ou arquivo, compactada no navegador), matrícula, turma, curso, responsável, telefone e UID NFC.
 * **Histórico e relatórios:** filtros por período, nome/turma/UID e status, paginação, atualização em tempo real (Supabase Realtime) e exportação CSV.
 * **Importação/exportação CSV:** modelo pronto para baixar, prévia com validação linha a linha, importação em lote e exportação de alunos e histórico.
@@ -171,6 +172,12 @@ npm run check   # verifica a sintaxe de js/ e scripts/
 7. O link `https://...vercel.app` serve para direção, secretaria, coordenação e admin. **A portaria com ESP32 deve continuar usando o modo local HTTP** (veja abaixo).
 
 > ⚠️ A portaria **não funciona** pelo link HTTPS da Vercel: o navegador bloqueia chamadas de uma página HTTPS para o ESP32 em HTTP na rede local (*mixed content / Private Network Access*). O painel exibe o selo **Bloq. HTTPS** e instrui a abrir o modo local.
+
+### Acompanhar de fora da escola
+
+A direção pode entrar no link da Vercel com uma conta **Direção** ou **Admin** e abrir **Histórico**. O painel remoto lê o Supabase, não o ESP32, então não precisa de IP público, VPN ou liberar porta no roteador. A atualização chega por Realtime e, como garantia, por consulta automática a cada 10 segundos.
+
+O dispositivo da portaria (computador/tablet com o painel local) precisa estar **ligado, online e com a página aberta/logada** — ele é a ponte entre o leitor e a nuvem. Se a internet cair, os acessos de alunos identificados ficam na fila e aparecem no histórico remoto quando sincronizarem. O painel embutido do ESP32 (`http://<ip>/`) não grava no Supabase; para monitoramento remoto use o painel completo.
 
 Manual completo de implantação: **[COMO_CONFIGURAR_E_PUBLICAR.md](COMO_CONFIGURAR_E_PUBLICAR.md)**.
 

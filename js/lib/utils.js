@@ -145,10 +145,13 @@ export function baixarArquivo(nome, conteudo, tipo = 'text/csv;charset=utf-8') {
   const a = document.createElement('a');
   a.href = url;
   a.download = nome;
+  a.rel = 'noopener';
+  a.style.display = 'none';
   document.body.appendChild(a);
   a.click();
   a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  // Dá tempo suficiente para o navegador iniciar o download antes de liberar.
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 
 export function csvEscape(valor, delimitador = ';') {

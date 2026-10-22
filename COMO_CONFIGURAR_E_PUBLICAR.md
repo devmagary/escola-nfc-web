@@ -386,7 +386,7 @@ Onde encontrar o IP do ESP32:
    * **ACESSO LIBERADO** — cartão cadastrado e ativo;
    * **ACESSO BLOQUEADO** — cartão cadastrado, mas bloqueado;
    * **NÃO CADASTRADO** — UID não encontrado.
-3. Cada leitura processada é registrada em `historico_acessos`. Se a gravação falhar (nuvem instável), o evento fica numa **fila local** no navegador e é reenviado quando a conexão volta. Sem internet, a decisão de liberar/bloquear continua sendo tomada pelo **próprio ESP32** com a base em Flash.
+3. Cada leitura processada é registrada em `historico_acessos`. Se a gravação falhar (nuvem instável), o acesso de um **aluno identificado** fica numa **fila local** no navegador e é reenviado quando a conexão volta. Tentativas de **cartão não cadastrado** são registradas quando a nuvem está online, mas **não entram na fila** (qualquer tag NFC geraria lixo na fila). Sem internet, a decisão de liberar/bloquear continua sendo tomada pelo **próprio ESP32** com a base em Flash; o painel usa a última base de alunos salva no dispositivo para exibir nome/status.
 4. Botões do totem: **⛶ Tela cheia**, **🔇/🔊 Ativar som** e, quando em tela cheia, **✕ Sair do modo totem**.
 5. O link **Notificar responsável no WhatsApp** abre a conversa com o telefone cadastrado.
 
@@ -416,6 +416,27 @@ No painel (**Configurações → Leitor ESP32**), use `http://localhost:8787` co
    ```bash
    curl "http://localhost:8787/mock/ler?uid=2C:9D:7E:8E"
    ```
+
+### 7.7 Acompanhar de fora da escola
+
+O acompanhamento remoto **não precisa acessar o ESP32 nem a rede local**. O caminho é:
+
+```
+painel da portaria (HTTP local)  →  Supabase (nuvem)  →  painel da direção (Vercel/HTTPS)
+```
+
+1. A portaria mantém o **painel completo** aberto e logado no dispositivo local. É ele que lê o ESP32 e grava cada acesso no Supabase.
+2. A direção entra no link da Vercel (`https://escola-nfc-web.vercel.app`) com uma conta de cargo **Direção** (ou admin) e abre **Histórico**.
+3. O histórico se atualiza por **Realtime** quando a publicação está configurada e, como garantia, por **consulta automática a cada 10 segundos**; o botão **↻ Atualizar agora** força a consulta.
+4. Não é necessário abrir porta no roteador, IP público ou túnel: apenas o Supabase e a Vercel são acessados pela internet.
+
+Condições importantes:
+
+* o dispositivo da portaria precisa estar **ligado, com internet e com a página da portaria aberta/logada** — ele é a ponte entre o leitor e a nuvem;
+* se a internet cair, os acessos de alunos identificados ficam na **fila local** e aparecem no histórico remoto quando sincronizarem (podem chegar com atraso);
+* o **painel embutido do ESP32** (`http://<ip-do-esp>/`) serve para cartões/histórico local, mas **não grava no Supabase**; para acompanhamento remoto use o painel completo;
+* se for necessário acompanhar mesmo com o navegador da portaria fechado, a evolução é fazer o **ESP32 enviar os eventos diretamente para o Supabase** (função/Edge Function com token de dispositivo) — isso é uma mudança de firmware, não necessária para o fluxo atual;
+* a conta remota precisa de cargo **Direção** ou **Admin** para ver o histórico; a RLS não libera dados para qualquer pessoa.
 
    ou abra `http://localhost:8787/mock/ler?uid=2C:9D:7E:8E` no navegador;
 

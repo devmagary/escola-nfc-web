@@ -258,10 +258,25 @@ export async function listarHistorico({ inicio, fim, busca, status, page = 0, pa
   return { rows: data || [], total: count || 0 };
 }
 
+// A tabela historico_acessos não guarda foto_url (a foto é carregada de
+// alunos.foto_url na portaria). O evento exibido na tela pode ter campos
+// extras; somente as colunas reais devem ir para o banco.
+export function prepararEventoHistorico(evento) {
+  const payload = {};
+  const colunas = ['id', 'uid_nfc', 'aluno_id', 'nome_identificado', 'turma', 'data_hora'];
+  colunas.forEach((coluna) => {
+    if (evento[coluna] !== undefined) payload[coluna] = evento[coluna];
+  });
+  payload.tipo_evento = evento.tipo_evento || 'ENTRADA';
+  payload.status = evento.status || 'NEGADO';
+  return payload;
+}
+
 export async function inserirHistorico(evento) {
+  const payload = prepararEventoHistorico(evento);
   const { error } = await obterCliente()
     .from('historico_acessos')
-    .upsert([evento], { onConflict: 'id', ignoreDuplicates: true });
+    .upsert([payload], { onConflict: 'id', ignoreDuplicates: true });
   if (error) throw error;
 }
 
