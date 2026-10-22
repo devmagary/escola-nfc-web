@@ -13,6 +13,8 @@
  *   POST /api/sincronizar_aluno  → { uid, nome, ativo }
  *   POST /api/sincronizar_todos  → [{ uid, nome, ativo }, ...]
  *   POST /api/remover_aluno      → { uid }
+ *   GET  /painel/                → painel completo (pasta painel-dist)
+ *   POST /api/painel/upload      → upload multipart do painel (Basic auth)
  *   GET  /mock/ler?uid=XX:YY    → simula uma leitura NFC (incrementa seq)
  *   GET  /mock/estado            → estado interno completo do simulador
  *
