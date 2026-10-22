@@ -1791,8 +1791,18 @@ bool servirArquivoPainel(const String& uri) {
   bool usarGzip = false;
   String aceita = server.header("Accept-Encoding");
   if (aceita.indexOf("gzip") >= 0 && fsPtr->exists((caminho + ".gz").c_str())) {
-    envio = caminho + ".gz";
-    usarGzip = true;
+    // Confere o cabecalho gzip (magic 1F 8B) antes de anunciar a versao comprimida.
+    // Se o .gz estiver corrompido no flash, cai para o arquivo bruto em vez de
+    // devolver uma pagina que o navegador nao consegue decodificar
+    // (ERR_CONTENT_DECODING_FAILED).
+    File teste = fsPtr->open((caminho + ".gz").c_str(), "r");
+    if (teste) {
+      uint8_t magic[2] = {0, 0};
+      size_t lidos = teste.read(magic, 2);
+      teste.close();
+      usarGzip = (lidos == 2 && magic[0] == 0x1F && magic[1] == 0x8B);
+    }
+    if (usarGzip) envio = caminho + ".gz";
   }
 
   if (!fsPtr->exists(envio.c_str())) {
@@ -1807,7 +1817,10 @@ bool servirArquivoPainel(const String& uri) {
     return true;
   }
 
-  if (usarGzip) server.sendHeader("Content-Encoding", "gzip");
+  // O WebServer (_streamFileCore) ja adiciona "Content-Encoding: gzip" quando o
+  // nome do arquivo termina em ".gz". Nao repetir o header aqui: duplicado, o
+  // navegador tenta descomprimir duas vezes e cancela o carregamento
+  // (net::ERR_CONTENT_DECODING_FAILED).
   server.sendHeader("Vary", "Accept-Encoding");
   // O painel e atualizado por upload; sem cache evita rodar JS antigo.
   server.sendHeader("Cache-Control", "no-store, max-age=0");
