@@ -179,8 +179,9 @@ bool     modoAP = false;
 bool     ntpSincronizado = false;
 
 // Controle de cor temporária do LED RGB
-uint32_t ledTemporarioAte = 0;
-uint8_t  ledTempR = 0, ledTempG = 0, ledTempB = 0;
+// volatile: o Core 0 (NFC) escreve e o Core 1 (loop/servidor) lê.
+volatile uint32_t ledTemporarioAte = 0;
+volatile uint8_t  ledTempR = 0, ledTempG = 0, ledTempB = 0;
 
 #if PINO_SAIDA >= 0
 bool     saidaLigada = false;
@@ -201,7 +202,8 @@ void acionarLedFeedback(uint8_t r, uint8_t g, uint8_t b, uint32_t duracaoMs) {
   ledTempG = g;
   ledTempB = b;
   ledTemporarioAte = millis() + duracaoMs;
-  aplicarCorLed(r, g, b);
+  // A aplicação no WS2812 fica somente no Core 1 (atualizarLedStatus),
+  // evitando chamadas concorrentes de rgb.show() nos dois núcleos.
 }
 
 void atualizarLedStatus() {
@@ -1506,6 +1508,23 @@ void rotaComandoConsole() {
                " | RSSI: " + String(WiFi.RSSI()) + " dBm" +
                " | Heap: " + String(ESP.getFreeHeap() / 1024) + " KB" +
                " | PSRAM: " + String(ESP.getFreePsram() / 1024) + " KB";
+    logSerial(resposta, "info");
+  } else if (cmd == "led_verde") {
+    acionarLedFeedback(0, 255, 0, 5000);
+    resposta = "LED verde por 5 segundos.";
+    logSerial(resposta, "ok");
+  } else if (cmd == "led_vermelho") {
+    acionarLedFeedback(255, 0, 0, 5000);
+    resposta = "LED vermelho por 5 segundos.";
+    logSerial(resposta, "err");
+  } else if (cmd == "led_azul") {
+    acionarLedFeedback(0, 80, 255, 5000);
+    resposta = "LED azul por 5 segundos.";
+    logSerial(resposta, "info");
+  } else if (cmd == "led_off") {
+    ledTemporarioAte = 0;
+    aplicarCorLed(0, 0, 0);
+    resposta = "LED apagado.";
     logSerial(resposta, "info");
   } else if (cmd == "limpar") {
     logTotal = 0;
