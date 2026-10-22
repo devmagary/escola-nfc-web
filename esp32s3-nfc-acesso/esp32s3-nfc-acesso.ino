@@ -1822,8 +1822,15 @@ bool servirArquivoPainel(const String& uri) {
   // navegador tenta descomprimir duas vezes e cancela o carregamento
   // (net::ERR_CONTENT_DECODING_FAILED).
   server.sendHeader("Vary", "Accept-Encoding");
-  // O painel e atualizado por upload; sem cache evita rodar JS antigo.
-  server.sendHeader("Cache-Control", "no-store, max-age=0");
+  if (caminho.startsWith("/painel/vendor/")) {
+    // Bibliotecas com a versao no nome do arquivo nunca mudam: podem ficar em
+    // cache. Os demais arquivos do painel usam no-store para que um novo
+    // painel:deploy apareca imediatamente no tablet.
+    server.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
+  } else {
+    // O painel e atualizado por upload; sem cache evita rodar JS antigo.
+    server.sendHeader("Cache-Control", "no-store, max-age=0");
+  }
   String tipo = mimeDoPainel(caminho);
   server.streamFile(arquivo, tipo.c_str());
   arquivo.close();
