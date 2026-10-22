@@ -62,6 +62,13 @@ export async function buildPainel({ root = PROJECT_ROOT, out = PAINEL_DIST } = {
   const jsFiles = await listarArquivos(jsDir, 'js');
   arquivos.push(...jsFiles);
 
+  // Bibliotecas servidas localmente (ex.: Supabase). O painel roda no proprio
+  // ESP32 e precisa abrir mesmo em redes sem internet (modo AP).
+  const vendorDir = path.join(root, 'vendor');
+  if (existsSync(vendorDir)) {
+    arquivos.push(...await listarArquivos(vendorDir, 'vendor'));
+  }
+
   let rawBytes = 0;
   let gzipBytes = 0;
   for (const relativo of arquivos) {

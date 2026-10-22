@@ -307,9 +307,13 @@ function iniciar() {
 
   window.addEventListener('online', () => {
     toast('Conexão restaurada. Sincronizando pendências...', 'ok');
+    removerAvisoOffline();
     sincronizarFilaHistorico();
   });
-  window.addEventListener('offline', () => toast('Você está offline. Os acessos ficarão na fila local.', 'err'));
+  window.addEventListener('offline', () => {
+    toast('Você está offline. Os acessos ficarão na fila local.', 'err');
+    if (!$('telaLogin')?.classList.contains('hidden')) avisarSeOffline();
+  });
 }
 
 function mostrarAvisoConfig(erros) {
@@ -336,6 +340,31 @@ function mostrarTelaLogin() {
   $('conteudoPrincipal')?.classList.add('hidden');
   $('menuUsuario')?.classList.add('hidden');
   if ($('loginSenha')) $('loginSenha').value = '';
+  avisarSeOffline();
+}
+
+// Quando o painel e aberto no modo AP do ESP32 (sem internet), o login no
+// Supabase nao funciona. Explica isso na propria tela de login em vez de
+// deixar o usuario diante de um erro generico.
+function avisarSeOffline() {
+  if (navigator.onLine) return removerAvisoOffline();
+  const card = document.querySelector('#telaLogin .auth-card');
+  if (!card || $('avisoOfflineLocal')) return;
+
+  const aviso = document.createElement('div');
+  aviso.id = 'avisoOfflineLocal';
+  aviso.className = 'aviso-config';
+  aviso.setAttribute('role', 'alert');
+  aviso.innerHTML = estaNoPainelEsp()
+    ? '<strong>Sem internet neste dispositivo.</strong><p>O login usa o Supabase. Conecte o tablet na rede da escola ou use o <a href="/">painel local da placa</a>. Para configurar a rede da placa, abra <a href="/wifi">/wifi</a>.</p>'
+    : '<strong>Sem internet.</strong><p>O painel precisa de conexao com o Supabase para entrar. Verifique o Wi-Fi e recarregue a pagina.</p>';
+
+  const form = card.querySelector('.auth-form');
+  card.insertBefore(aviso, form || card.firstChild);
+}
+
+function removerAvisoOffline() {
+  $('avisoOfflineLocal')?.remove();
 }
 
 function mostrarPainelPrincipal() {

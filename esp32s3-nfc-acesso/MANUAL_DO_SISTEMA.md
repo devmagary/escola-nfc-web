@@ -220,6 +220,8 @@ O ESP32 trabalha de forma integrada com a aplicação web escolar ([escola-nfc-w
 * `GET /painel/...`: serve arquivos estáticos; se existir a versão `.gz` e o navegador aceitar gzip, envia comprimido.
 * `POST /api/painel/upload?path=/painel/...`: recebe um arquivo multipart (campo `arquivo`) e grava no LittleFS. Exige o login Basic do painel da placa (`ADMIN_USUARIO`/`ADMIN_SENHA`).
 * O envio é feito pelo repositório web: `npm run painel:deploy -- --esp http://IP-DO-ESP`.
+* **Internet é obrigatória para entrar no painel:** o login é feito no Supabase. No modo AP (`ControleAcesso-S3`) a página até abre (a biblioteca do Supabase é servida pela própria placa em `vendor/`), mas o login não funciona. Use o painel local `http://192.168.4.1/` ou configure a rede em `/wifi`.
+* **Tela em branco / `ERR_CONTENT_DECODING_FAILED`:** firmware anterior à correção duplicava o header `Content-Encoding: gzip` ao servir os arquivos `.gz`, e o navegador cancelava a página. Atualize o firmware; o upload do painel não precisa ser refeito.
 
 ### Rotas de Configuração de Wi-Fi:
 * `GET /wifi`: Página de configuração (aberta no modo AP; exige login do painel quando já conectado).

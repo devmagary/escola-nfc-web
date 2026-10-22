@@ -462,11 +462,13 @@ Se não houver computador na portaria, a placa pode hospedar o painel completo:
    ```bash
    npm run painel:deploy -- --esp http://192.168.0.73
    ```
-   O script gera `painel-dist/` (~185 KB bruto / ~45 KB gzip), envia os arquivos para o LittleFS e valida `http://IP/painel/`.
+   O script gera `painel-dist/` (~295 KB bruto / ~74 KB gzip), envia os arquivos para o LittleFS e valida `http://IP/painel/`.
 3. No tablet, abra `http://192.168.0.73/painel/` (ou `http://nfc.local/painel/` se o mDNS funcionar). Faça login com a conta normal do Supabase.
 4. Crie um atalho na tela inicial e, se possível, reserve um IP fixo para o ESP32 no roteador.
 
 O painel é servido em HTTP pela própria placa e usa a API na **mesma origem** (`/api/...`), então não há mixed content. As chamadas ao Supabase continuam indo direto do tablet para HTTPS. A senha do upload é a `ADMIN_SENHA` do firmware (padrão `admin123`; **troque**). Para atualizar o painel depois, rode `npm run painel:deploy` novamente.
+
+> **O tablet precisa de internet.** O login do painel é feito no Supabase. No modo AP da placa (`ControleAcesso-S3`) não há internet: a página abre, mas o login não funciona — use o painel local `http://192.168.4.1/` ou configure a rede em `/wifi`. A biblioteca do Supabase é embutida no pacote (`vendor/`), então a página não depende de CDN.
 
 Limitações: o primeiro flash/upload ainda precisa de um computador; webcam e Wake Lock não funcionam em HTTP fora de `localhost` (a portaria não usa webcam; para manter a tela ligada use as configurações do tablet ou um navegador de quiosque). O `WebServer` do ESP32 atende uma requisição por vez: use um tablet na portaria e deixe a Vercel para a gestão.
 

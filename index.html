@@ -8,8 +8,9 @@
   <title>Acesso Escolar NFC</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8E%93%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
-  <!-- Biblioteca oficial do Supabase (CDN fixado para evitar mudanças inesperadas) -->
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4"></script>
+  <!-- O Supabase e servido localmente (vendor/) e carregado no fim do body:
+       um script externo aqui bloquearia a renderizacao quando a placa esta
+       no modo AP (sem internet), deixando a pagina so com o fundo. -->
 </head>
 <body>
 
@@ -662,6 +663,9 @@
     <div class="aviso-config">Este sistema precisa de JavaScript ativado para funcionar.</div>
   </noscript>
 
+  <!-- Biblioteca do Supabase servida pelo proprio site (funciona sem CDN).
+       Vem antes do config.js/app.js para definir window.supabase. -->
+  <script src="vendor/supabase-js-2.45.4.js"></script>
   <!-- config.js é gerado no build (npm run build) e contém apenas a URL e a anon key públicas. -->
   <script src="config.js"></script>
   <script type="module" src="js/app.js"></script>

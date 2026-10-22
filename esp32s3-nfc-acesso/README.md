@@ -48,7 +48,9 @@ No repositório web, rode:
 npm run painel:deploy -- --esp http://IP-DO-ESP
 ```
 
-O pacote tem ~185 KB (ou ~45 KB gzip) e cabe na partição LittleFS/FAT de 8–9,9 MB. O upload usa `ADMIN_USUARIO`/`ADMIN_SENHA` do firmware; troque a senha padrão. Após enviar, o tablet abre `http://IP-DO-ESP/painel/` e continua falando direto com o Supabase.
+O pacote tem ~295 KB (ou ~74 KB gzip) e cabe na partição LittleFS/FAT de 8–9,9 MB. O upload usa `ADMIN_USUARIO`/`ADMIN_SENHA` do firmware; troque a senha padrão. Após enviar, o tablet abre `http://IP-DO-ESP/painel/` e continua falando direto com o Supabase.
+
+> **Internet é obrigatória para entrar no painel.** A autenticação é feita no Supabase. No modo AP (`ControleAcesso-S3`) não existe internet: a página abre (a biblioteca do Supabase é servida pela própria placa, em `vendor/`), mas o login não funciona. Nesse modo use o painel local em `http://192.168.4.1/` ou configure a rede em `/wifi`.
 
 Para atualizar só o painel (sem regravar o firmware), repita `npm run painel:deploy`. Se a partição de dados for alterada, envie novamente. O `WebServer` atende uma requisição por vez; para uma portaria com um tablet, o custo é pequeno, e a decisão de acesso do NFC continua no Core 0, independente do servidor web.
 

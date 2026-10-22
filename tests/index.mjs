@@ -12,3 +12,4 @@ import './build-config.test.mjs';
 import './utils.test.mjs';
 import './bootstrap-admin.test.mjs';
 import './history.test.mjs';
+import './painel-build.test.mjs';
