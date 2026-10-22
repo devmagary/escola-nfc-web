@@ -25,8 +25,17 @@ Firmware do controlador de acesso (ESP32-S3 N16R8 + leitor PN532) que conversa c
 
 Se a placa não encontrar a rede salva, ela cria o AP **`ControleAcesso-S3`** e o portal cativo abre a página `/wifi`: escolha a rede 2,4 GHz, digite a senha e a placa salva na NVS e reinicia conectada. O passo a passo está na seção 5.3 do manual.
 
-## Painel web no próprio ESP32
+## Diagnóstico de desempenho (v2.0.0-diag)
 
+A build instrumentada mede o loop principal, `server.handleClient()`, processamento NFC e operações de Flash. Eventos lentos aparecem no `/console` e em:
+
+```text
+http://IP-DO-ESP/api/diagnostico
+```
+
+O `/api/status` também expõe versão, heap, PSRAM, stack, máximos por categoria e contador de engasgos. Limiares: loop 50 ms, HTTP 80 ms, NFC 50 ms, FS 25 ms. Isso não altera a lógica de acesso; serve para identificar se as travadas vêm do HTTP, da Flash ou do NFC.
+
+## Painel web no próprio ESP32
 O firmware inclui as rotas:
 
 - `GET /painel/` — painel web completo (HTML/CSS/JS) servido do LittleFS, na mesma origem da API;

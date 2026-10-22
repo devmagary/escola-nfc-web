@@ -30,6 +30,7 @@
 #include <Wire.h>
 #include <Adafruit_PN532.h>
 #include <time.h>
+#include <string.h>
 #include <Preferences.h>
 #include <DNSServer.h>
 #include "esp_partition.h"
@@ -110,6 +111,17 @@ const char* ARQ_CARTOES   = "/cartoes.json";
 const char* ARQ_HISTORICO = "/historico.json";
 #define MAX_HISTORICO_LOG 50
 
+// Versão desta build de diagnóstico (aparece em /api/status e /api/diagnostico).
+#define FW_VERSAO "2.0.0-diag"
+
+// Limiares do diagnóstico de desempenho (ms). Eventos acima disso são
+// registrados no buffer circular e, com rate-limit, no console.
+#define DIAG_LIMIAR_LOOP_MS  50
+#define DIAG_LIMIAR_HTTP_MS  80
+#define DIAG_LIMIAR_NFC_MS   50
+#define DIAG_LIMIAR_FS_MS    25
+#define MAX_EVENTOS_DIAG     32
+
 // Painel web completo (HTML/CSS/JS) servido pela própria placa.
 // Os arquivos são enviados por scripts/painel-upload.mjs para o LittleFS.
 const char* PASTA_PAINEL = "/painel";
@@ -165,6 +177,33 @@ bool    painelUploadFalhou = false;
 
 // Sincronização entre Cores (Core 0 para NFC, Core 1 para Web)
 SemaphoreHandle_t  travaDados;
+SemaphoreHandle_t  travaLog = nullptr;
+SemaphoreHandle_t  travaDiag = nullptr;
+
+// Diagnóstico de desempenho / engasgos.
+struct EventoDiag {
+  uint32_t    ms;
+  uint32_t    durMs;
+  const char* tipo;
+  char        detalhe[72];
+  uint32_t    heap;
+  int16_t     rssi;
+};
+
+EventoDiag bufferDiag[MAX_EVENTOS_DIAG];
+int        diagIndex = 0;
+int        diagTotal = 0;
+volatile uint32_t diagLoopMaxMs = 0;
+volatile uint32_t diagLoopSomaMs = 0;
+volatile uint32_t diagLoopAmostras = 0;
+volatile uint32_t diagHttpMaxMs = 0;
+volatile uint32_t diagNfcMaxMs = 0;
+volatile uint32_t diagFsMaxMs = 0;
+volatile uint32_t diagEngasgos = 0;
+volatile uint32_t diagUltimoLoopMs = 0;
+volatile uint32_t diagUltimoLogMs = 0;
+volatile uint32_t diagNfcStackMin = 0;
+uint32_t diagUltimoHeartbeatMs = 0;
 
 // Informações do último cartão lido
 String   ultimoUidLido = "";
@@ -298,6 +337,9 @@ int logTotal = 0;
 uint32_t logProximoId = 1;
 
 void logSerial(const String& msg, const String& tipo = "info") {
+  bool travado = false;
+  if (travaLog) travado = (xSemaphoreTake(travaLog, portMAX_DELAY) == pdTRUE);
+
   String hora = obterDataHoraAtual();
   if (hora.isEmpty()) {
     uint32_t s = millis() / 1000;
@@ -319,6 +361,43 @@ void logSerial(const String& msg, const String& tipo = "info") {
   bufferLogs[pos].tipo = tipo;
 
   Serial.printf("[%s] %s\n", hora.c_str(), msg.c_str());
+  if (travado) xSemaphoreGive(travaLog);
+}
+
+// Registra um evento lento no buffer circular e (com rate-limit) no console.
+// Não usar dentro de travaLog/travaDiag: esta função adquire travaDiag e
+// chama logSerial.
+void registrarEventoDiag(const char* tipo, uint32_t durMs, const String& detalhe) {
+  uint32_t agora = millis();
+
+  if (travaDiag) xSemaphoreTake(travaDiag, portMAX_DELAY);
+  EventoDiag& evento = bufferDiag[(diagIndex + diagTotal) % MAX_EVENTOS_DIAG];
+  evento.ms = agora;
+  evento.durMs = durMs;
+  evento.tipo = tipo;
+  strncpy(evento.detalhe, detalhe.c_str(), sizeof(evento.detalhe) - 1);
+  evento.detalhe[sizeof(evento.detalhe) - 1] = '\0';
+  evento.heap = ESP.getFreeHeap();
+  evento.rssi = (int16_t)WiFi.RSSI();
+  if (diagTotal < MAX_EVENTOS_DIAG) {
+    diagTotal++;
+  } else {
+    diagIndex = (diagIndex + 1) % MAX_EVENTOS_DIAG;
+  }
+  if (travaDiag) xSemaphoreGive(travaDiag);
+
+  // Evita que um problema persistente inunde o console e piore o engasgo.
+  if (agora - diagUltimoLogMs < 1500) return;
+  diagUltimoLogMs = agora;
+
+  char linha[180];
+  snprintf(linha, sizeof(linha), "%s lento: %lu ms | heap %lu | RSSI %d | %s",
+           tipo, (unsigned long)durMs, (unsigned long)ESP.getFreeHeap(),
+           WiFi.RSSI(), detalhe.c_str());
+  const char* nivel = "info";
+  if (strcmp(tipo, "LOOP") == 0) nivel = "err";
+  else if (strcmp(tipo, "FS") == 0 || strcmp(tipo, "HTTP") == 0) nivel = "wa";
+  logSerial(String("[DIAG] ") + linha, nivel);
 }
 
 // =====================================================================
@@ -423,19 +502,29 @@ void imprimirDiagnosticoFlash() {
 
 bool salvarJsonNoArquivo(const char* caminho, const JsonDocument& doc) {
   if (!fsPtr) return false;
+  uint32_t inicio = micros();
   File arq = fsPtr->open(caminho, "w");
   if (!arq) return false;
   serializeJson(doc, arq);
   arq.close();
+
+  uint32_t durMs = (micros() - inicio) / 1000;
+  if (durMs > diagFsMaxMs) diagFsMaxMs = durMs;
+  if (durMs >= DIAG_LIMIAR_FS_MS) registrarEventoDiag("FS", durMs, String("gravar ") + caminho);
   return true;
 }
 
 bool carregarJsonDoArquivo(const char* caminho, JsonDocument& doc) {
   if (!fsPtr || !fsPtr->exists(caminho)) return false;
+  uint32_t inicio = micros();
   File arq = fsPtr->open(caminho, "r");
   if (!arq) return false;
   DeserializationError erro = deserializeJson(doc, arq);
   arq.close();
+
+  uint32_t durMs = (micros() - inicio) / 1000;
+  if (durMs > diagFsMaxMs) diagFsMaxMs = durMs;
+  if (durMs >= DIAG_LIMIAR_FS_MS) registrarEventoDiag("FS", durMs, String("ler ") + caminho);
   return (erro == DeserializationError::Ok);
 }
 
@@ -539,6 +628,7 @@ bool iniciarPN532(bool verboso) {
 }
 
 void processarLeituraNfc(String uidFormatado) {
+  uint32_t inicioUs = micros();
   xSemaphoreTake(travaDados, portMAX_DELAY);
 
   ultimoUidLido = uidFormatado;
@@ -597,6 +687,12 @@ void processarLeituraNfc(String uidFormatado) {
   registrarAcessoNoHistorico(uidFormatado, nome, res);
 
   xSemaphoreGive(travaDados);
+
+  uint32_t durMs = (micros() - inicioUs) / 1000;
+  if (durMs > diagNfcMaxMs) diagNfcMaxMs = durMs;
+  if (durMs >= DIAG_LIMIAR_NFC_MS) {
+    registrarEventoDiag("NFC", durMs, String("cartao ") + uidFormatado);
+  }
 }
 
 // Tarefa dedicada do Core 0 (FreeRTOS)
@@ -629,6 +725,8 @@ void tarefaNFC(void* parametro) {
         Serial.println("\n[ALERTA HARDWARE] Modulo PN532 parou de responder! Verifique os fios SDA (GPIO 8) e SCL (GPIO 9).");
         continue;
       }
+      uint32_t pilha = uxTaskGetStackHighWaterMark(NULL);
+      if (diagNfcStackMin == 0 || pilha < diagNfcStackMin) diagNfcStackMin = pilha;
     }
 
     // 3. Leitura passiva com timeout curto (50ms)
@@ -1027,6 +1125,7 @@ void rotaLimparLog() {
 void rotaStatusSistema() {
   // Rota de telemetria pública para monitoramento do totem/portaria
   JsonDocument doc;
+  doc["versao"] = FW_VERSAO;
   doc["modo"] = modoAP ? "AP" : "STA";
   doc["ssid"] = modoAP ? AP_SSID : WiFi.SSID();
   doc["ip"] = (modoAP ? WiFi.softAPIP() : WiFi.localIP()).toString();
@@ -1042,10 +1141,56 @@ void rotaStatusSistema() {
   doc["bluetooth"] = RADIO_BLUETOOTH;
   doc["nfc"] = nfcOk;
   doc["psram"] = ESP.getPsramSize() / (1024 * 1024);
+  doc["psram_livre"] = ESP.getFreePsram();
   doc["flash"] = ESP.getFlashChipSize() / (1024 * 1024);
   doc["fs"] = nomeFsAtivo;
+  doc["heap_livre"] = ESP.getFreeHeap();
+  doc["heap_min"] = ESP.getMinFreeHeap();
+  doc["loop_max_ms"] = diagLoopMaxMs;
+  doc["http_max_ms"] = diagHttpMaxMs;
+  doc["nfc_max_ms"] = diagNfcMaxMs;
+  doc["fs_max_ms"] = diagFsMaxMs;
+  doc["engasgos"] = diagEngasgos;
   doc["uptime"] = millis() / 1000;
   doc["hora"] = obterDataHoraAtual();
+
+  String s;
+  serializeJson(doc, s);
+  responderJson(200, s);
+}
+
+void rotaDiagnostico() {
+  JsonDocument doc;
+  doc["versao"] = FW_VERSAO;
+  doc["uptime_s"] = millis() / 1000;
+  doc["nfc_ok"] = nfcOk;
+  doc["rssi"] = WiFi.RSSI();
+  doc["heap_livre"] = ESP.getFreeHeap();
+  doc["heap_min"] = ESP.getMinFreeHeap();
+  doc["psram_livre"] = ESP.getFreePsram();
+  doc["stack_loop"] = (unsigned)uxTaskGetStackHighWaterMark(NULL);
+  doc["stack_nfc"] = (unsigned)diagNfcStackMin;
+  doc["loop_max_ms"] = diagLoopMaxMs;
+  doc["loop_avg_ms"] = diagLoopAmostras ? (diagLoopSomaMs / diagLoopAmostras) : 0;
+  doc["http_max_ms"] = diagHttpMaxMs;
+  doc["nfc_max_ms"] = diagNfcMaxMs;
+  doc["fs_max_ms"] = diagFsMaxMs;
+  doc["engasgos"] = diagEngasgos;
+  doc["eventos_total"] = diagTotal;
+
+  JsonArray eventos = doc["eventos"].to<JsonArray>();
+  if (travaDiag) xSemaphoreTake(travaDiag, portMAX_DELAY);
+  for (int i = 0; i < diagTotal; i++) {
+    EventoDiag& e = bufferDiag[(diagIndex + i) % MAX_EVENTOS_DIAG];
+    JsonObject item = eventos.add<JsonObject>();
+    item["ms"] = e.ms;
+    item["dur_ms"] = e.durMs;
+    item["tipo"] = e.tipo;
+    item["detalhe"] = e.detalhe;
+    item["heap"] = e.heap;
+    item["rssi"] = e.rssi;
+  }
+  if (travaDiag) xSemaphoreGive(travaDiag);
 
   String s;
   serializeJson(doc, s);
@@ -1795,6 +1940,7 @@ void configurarRotasServidor() {
   server.on("/api/log",       HTTP_GET,    rotaObterLog);
   server.on("/api/log",       HTTP_DELETE, rotaLimparLog);
   server.on("/api/status",    HTTP_GET,    rotaStatusSistema);
+  server.on("/api/diagnostico", HTTP_GET,  rotaDiagnostico);
   server.on("/wifi",               HTTP_GET,  rotaPaginaWifi);
   server.on("/api/wifi/estado",    HTTP_GET,  rotaEstadoWifi);
   server.on("/api/wifi/scan",      HTTP_GET,  rotaScanWifi);
@@ -1916,9 +2062,14 @@ void setup() {
   uint32_t t0 = millis();
   while (!Serial && millis() - t0 < 2500) delay(10);
 
+  uint32_t bootInicio = millis();
+  travaLog = xSemaphoreCreateMutex();
+  travaDiag = xSemaphoreCreateMutex();
+
   Serial.println("\n==========================================");
   Serial.println("  Controle de Acesso NFC - ESP32-S3 N16R8 ");
   Serial.println("==========================================");
+  logSerial(String("[BOOT] Versao ") + FW_VERSAO + " | heap inicial " + String(ESP.getFreeHeap()) + " bytes", "info");
 
   // Inicializa LED RGB no GPIO 48
   rgb.begin();
@@ -1933,16 +2084,23 @@ void setup() {
 #endif
 
   // Executa diagnóstico detalhado e monta LittleFS ou FFat
+  uint32_t marcaFs = millis();
   inicializarArquivosDados();
+  logSerial(String("[BOOT] Sistema de arquivos pronto em ") + String(millis() - marcaFs) + " ms | heap " + String(ESP.getFreeHeap()), "info");
 
   // Inicia I2C no ESP32-S3 (pinos 8 e 9)
   Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setTimeOut(50); // Timeout para evitar travamento se os fios do leitor soltarem
+  uint32_t marcaNfc = millis();
   nfcOk = iniciarPN532(true);
+  logSerial(String("[BOOT] PN532 ") + (nfcOk ? "OK" : "AUSENTE") + " em " + String(millis() - marcaNfc) + " ms", nfcOk ? "ok" : "err");
 
+  uint32_t marcaWifi = millis();
   iniciarConexaoWiFi();
+  logSerial(String("[BOOT] Wi-Fi tratado em ") + String(millis() - marcaWifi) + " ms | IP " + (modoAP ? WiFi.softAPIP().toString() : WiFi.localIP().toString()), "info");
   configurarRotasServidor();
   server.begin();
+  logSerial(String("[BOOT] Servidor HTTP iniciado | heap ") + String(ESP.getFreeHeap()) + " | PSRAM " + String(ESP.getFreePsram()), "info");
 
   // Cria a tarefa de leitura do NFC no CORE 0
   xTaskCreatePinnedToCore(
@@ -1955,14 +2113,59 @@ void setup() {
     0
   );
 
+  diagUltimoLoopMs = millis();
+  diagUltimoHeartbeatMs = millis();
+  logSerial(String("[BOOT] Sistema operacional em ") + String(millis() - bootInicio) + " ms | heap " + String(ESP.getFreeHeap()) + " | stack loop " + String(uxTaskGetStackHighWaterMark(NULL)), "ok");
   Serial.println("\nSistema operacional! Aproxime uma tag NFC...");
 }
 
 void loop() {
+  uint32_t inicioLoopUs = micros();
+  uint32_t agoraMs = millis();
+
+  // Gap entre iterações: se o Core 1 ficou bloqueado, aparece aqui.
+  if (diagUltimoLoopMs != 0) {
+    uint32_t gapMs = agoraMs - diagUltimoLoopMs;
+    if (gapMs >= DIAG_LIMIAR_LOOP_MS) {
+      diagEngasgos++;
+      registrarEventoDiag("LOOP", gapMs, "gap entre iteracoes do loop");
+    }
+  }
+  diagUltimoLoopMs = agoraMs;
+
+  uint32_t inicioHttpUs = micros();
   server.handleClient();
+  uint32_t httpMs = (micros() - inicioHttpUs) / 1000;
+  if (httpMs > diagHttpMaxMs) diagHttpMaxMs = httpMs;
+  if (httpMs >= DIAG_LIMIAR_HTTP_MS) {
+    registrarEventoDiag("HTTP", httpMs, server.uri());
+  }
+
   dnsServer.processNextRequest(); // portal cativo (sem efeito fora do modo AP)
   processarTentativaWifi();
   atualizarSaidaFechadura();
   atualizarLedStatus();
+
+  uint32_t totalMs = (micros() - inicioLoopUs) / 1000;
+  if (totalMs > diagLoopMaxMs) diagLoopMaxMs = totalMs;
+  diagLoopSomaMs += totalMs;
+  diagLoopAmostras++;
+
+  if (millis() - diagUltimoHeartbeatMs >= 60000) {
+    diagUltimoHeartbeatMs = millis();
+    uint32_t mediaMs = diagLoopAmostras ? (diagLoopSomaMs / diagLoopAmostras) : 0;
+    char linha[240];
+    snprintf(linha, sizeof(linha),
+             "loop avg %lu max %lu ms | HTTP max %lu | NFC max %lu | FS max %lu | engasgos %lu | heap %lu min %lu | PSRAM %lu | RSSI %d | stack loop %u NFC %u",
+             (unsigned long)mediaMs, (unsigned long)diagLoopMaxMs,
+             (unsigned long)diagHttpMaxMs, (unsigned long)diagNfcMaxMs,
+             (unsigned long)diagFsMaxMs, (unsigned long)diagEngasgos,
+             (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap(),
+             (unsigned long)ESP.getFreePsram(), WiFi.RSSI(),
+             (unsigned)uxTaskGetStackHighWaterMark(NULL),
+             (unsigned)diagNfcStackMin);
+    logSerial(String("[DIAG] ") + linha, "info");
+  }
+
   delay(2);
 }

@@ -18,6 +18,7 @@ O site **não pede URL nem chave do Supabase em nenhum navegador**. A configura�
 * **Configuração zero no navegador:** `config.js` gerado no build; IP do ESP32 é a única preferência por dispositivo (fica no `localStorage` do navegador).
 * **Diagnóstico integrado:** aba **Configurações** testa nuvem (API, migração `foto_path`, histórico, função de setup e bucket de fotos) e o leitor ESP32.
 * **Qualidade:** testes automatizados (`npm test`), verificação de sintaxe (`npm run check`) e CI no GitHub Actions.
+* **Diagnóstico de desempenho no firmware 2.0.0-diag:** `/api/diagnostico` mostra loop, HTTP, NFC, FS, heap, PSRAM, stack e eventos lentos; `/console` exibe os logs completos.
 
 ## ⚙️ Como a configuração funciona
 

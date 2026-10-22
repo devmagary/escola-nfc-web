@@ -148,6 +148,21 @@ Uma vez gravado o código na placa, você **não precisa mais do cabo USB**. Tod
   * **⏸️ Pausar Rolagem / Limpar Tela:** Para inspecionar mensagens pausadas.
   * **Teste do LED:** o console tem os botões **🟢 Testar LED verde** e **🔴 LED vermelho**; eles acendem a cor por 5 s e ajudam a isolar problemas de hardware.
 
+### 5.1.1. Diagnóstico de engasgos (`/api/diagnostico`)
+
+A versão **2.0.0-diag** adiciona instrumentação sem alterar as funções:
+
+* mede o **gap entre iterações do loop**, tempo de `server.handleClient()`, processamento de cartão e operações de Flash;
+* registra no console eventos acima dos limiares: loop > 50 ms, HTTP > 80 ms, NFC > 50 ms, FS > 25 ms;
+* mantém um buffer circular de 32 eventos e expõe tudo em:
+  ```text
+  http://<ip-do-esp>/api/diagnostico
+  ```
+* mostra `heap_livre`, `heap_min`, PSRAM, `stack_loop`, `stack_nfc`, RSSI e contadores de engasgo;
+* o `/api/status` também passou a devolver `versao`, `heap_livre`, `heap_min`, `loop_max_ms`, `http_max_ms`, `nfc_max_ms`, `fs_max_ms` e `engasgos`.
+
+Use a página `/console` para ver os logs e o endpoint `/api/diagnostico` para os números. Um pico isolado em `HTTP` é normal ao carregar o painel; valores altos e repetidos em `LOOP` ou `FS` indicam o que precisa ser otimizado.
+
 ---
 
 ### 5.2. Atualização de Firmware Sem Cabos OTA (`/ota`)
