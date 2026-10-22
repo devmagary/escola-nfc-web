@@ -62,7 +62,12 @@ async function enviarArquivo(baseUrl, relativo, arquivo, auth) {
 
   const resposta = await fetch(`${baseUrl}/api/painel/upload?path=${encodeURIComponent(destino)}`, {
     method: 'POST',
-    headers: { Authorization: auth },
+    headers: {
+      Authorization: auth,
+      // O WebServer do ESP32 fecha a conexão; evita o parser keep-alive do
+      // undici (Node 24) reclamar de socket encerrado no fim do processo.
+      Connection: 'close'
+    },
     body: form,
     signal: AbortSignal.timeout(30000)
   });
@@ -107,9 +112,15 @@ export async function uploadPainel({
     log(`   [${i + 1}/${arquivos.length}] ${relativo} (${(resultado.bytes / 1024).toFixed(1)} KB)`);
   }
 
-  const verificacao = await fetch(`${baseUrl}/painel/`, { signal: AbortSignal.timeout(10000) });
+  const verificacao = await fetch(`${baseUrl}/painel/`, {
+    headers: { Connection: 'close' },
+    signal: AbortSignal.timeout(10000)
+  });
+  // Consome o corpo antes de encerrar; sem isso o parser do undici pode
+  // disparar "assert(!this.paused)" ao fechar o socket do ESP32.
+  const corpoVerificacao = await verificacao.text();
   if (!verificacao.ok) {
-    throw new Error(`Upload concluído, mas ${baseUrl}/painel/ respondeu HTTP ${verificacao.status}.`);
+    throw new Error(`Upload concluído, mas ${baseUrl}/painel/ respondeu HTTP ${verificacao.status}: ${corpoVerificacao.slice(0, 120)}`);
   }
 
   log('');

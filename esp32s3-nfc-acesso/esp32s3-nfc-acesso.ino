@@ -1752,6 +1752,10 @@ void rotaUploadPainelArquivo() {
 }
 
 void configurarRotasServidor() {
+  // Necessário para ler Accept-Encoding e servir os .gz do painel.
+  static const char* CABECALHOS_PAINEL[] = {"Accept-Encoding"};
+  server.collectHeaders(CABECALHOS_PAINEL, 1);
+
   server.on("/",              HTTP_GET,    rotaPaginaPrincipal);
 
   // Painel web completo servido pela placa (mesma origem da API).
