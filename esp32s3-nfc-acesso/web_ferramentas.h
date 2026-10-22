@@ -103,6 +103,8 @@ button:disabled{opacity:0.5;cursor:not-allowed}
 
 <div class="toolbar">
   <button type="button" class="pri" onclick="enviarComando('ping_nfc')">📡 Testar PN532</button>
+  <button type="button" class="pri" onclick="enviarComando('led_verde')">🟢 Testar LED verde</button>
+  <button type="button" onclick="enviarComando('led_vermelho')">🔴 LED vermelho</button>
   <button type="button" onclick="enviarComando('status')">📊 Diagnóstico</button>
   <button type="button" id="btnScroll" onclick="alternarScroll()">⏸️ Pausar Rolagem</button>
   <button type="button" onclick="limparTela()">🧹 Limpar Tela</button>

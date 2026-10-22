@@ -146,7 +146,7 @@ Uma vez gravado o código na placa, você **não precisa mais do cabo USB**. Tod
   * **📊 Botão "Diagnóstico":** Exibe IP, sinal RSSI, Uptime e memória RAM livre (Heap interna e PSRAM).
   * **🔄 Botão "Reiniciar ESP32":** Reinicialização remota com 1 toque.
   * **⏸️ Pausar Rolagem / Limpar Tela:** Para inspecionar mensagens pausadas.
-  * **Teste do LED:** no campo de comando, envie `led_verde`, `led_vermelho`, `led_azul` ou `led_off` para acender a cor por 5 s e isolar problemas de hardware.
+  * **Teste do LED:** o console tem os botões **🟢 Testar LED verde** e **🔴 LED vermelho**; eles acendem a cor por 5 s e ajudam a isolar problemas de hardware.
 
 ---
 
