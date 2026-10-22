@@ -22,10 +22,28 @@
  */
 import http from 'node:http';
 import path from 'node:path';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 /** Porta padrão do ESP32 simulado. */
 export const DEFAULT_PORT = 8787;
+
+export const PROJECT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+export const PAINEL_DIST = path.join(PROJECT_ROOT, 'painel-dist');
+export const PAINEL_USUARIO = 'admin';
+export const PAINEL_SENHA = 'admin123';
+
+const MIME_PAINEL = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon',
+};
 
 /**
  * Estado em memória (reinicia a cada execução).
@@ -178,6 +196,136 @@ async function lerCorpo(req) {
   return { ok: true, dados: Object.fromEntries(new URLSearchParams(texto)) };
 }
 
+function autorizadoPainel(req) {
+  const esperado = 'Basic ' + Buffer.from(`${PAINEL_USUARIO}:${PAINEL_SENHA}`, 'utf8').toString('base64');
+  return String(req.headers.authorization ?? '') === esperado;
+}
+
+function resolverArquivoPainel(pathname) {
+  let relativo;
+  try { relativo = decodeURIComponent(pathname); } catch { return null; }
+  if (!relativo.startsWith('/painel/')) return null;
+  relativo = relativo.slice('/painel/'.length);
+  if (!relativo || relativo.endsWith('/')) relativo += 'index.html';
+  if (relativo.includes('..') || relativo.includes('\\')) return null;
+  const base = path.resolve(PAINEL_DIST);
+  const arquivo = path.resolve(base, relativo);
+  if (arquivo !== base && !arquivo.startsWith(base + path.sep)) return null;
+  return arquivo;
+}
+
+async function servirPainel(req, res, pathname) {
+  if (pathname === '/painel') {
+    res.writeHead(302, { Location: '/painel/', 'Cache-Control': 'no-store' });
+    res.end('Redirecionando para /painel/');
+    return;
+  }
+
+  const arquivo = resolverArquivoPainel(pathname);
+  if (!arquivo) {
+    enviarTexto(res, 400, 'Caminho do painel inválido.');
+    return;
+  }
+
+  let info;
+  try { info = await stat(arquivo); } catch { info = null; }
+  if (!info?.isFile()) {
+    enviarTexto(res, 404, 'Painel ainda não enviado. Rode: npm run painel:build && npm run painel:upload -- --esp http://127.0.0.1:8787');
+    return;
+  }
+
+  let envio = arquivo;
+  let gzip = false;
+  if (String(req.headers['accept-encoding'] ?? '').includes('gzip')) {
+    try {
+      await stat(arquivo + '.gz');
+      envio = arquivo + '.gz';
+      gzip = true;
+    } catch { /* sem .gz */ }
+  }
+
+  const conteudo = await readFile(envio);
+  const ext = path.extname(arquivo).toLowerCase();
+  const headers = {
+    'Content-Type': MIME_PAINEL[ext] ?? 'application/octet-stream',
+    'Content-Length': conteudo.length,
+    'Cache-Control': 'no-store, max-age=0',
+    'Access-Control-Allow-Origin': '*',
+  };
+  if (gzip) {
+    headers['Content-Encoding'] = 'gzip';
+    headers.Vary = 'Accept-Encoding';
+  }
+  res.writeHead(200, headers);
+  res.end(conteudo);
+}
+
+function enviarTexto(res, status, mensagem) {
+  res.writeHead(status, {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
+  res.end(mensagem);
+}
+
+async function uploadPainel(req, res, url) {
+  if (!autorizadoPainel(req)) {
+    res.writeHead(401, {
+      'WWW-Authenticate': 'Basic realm="ESP32-S3 NFC"',
+      'Content-Type': 'text/plain; charset=utf-8',
+    });
+    res.end('Autenticação necessária.');
+    return;
+  }
+
+  const destinoRelativo = url.searchParams.get('path') ?? '';
+  if (!destinoRelativo.startsWith('/painel/') || destinoRelativo.includes('..') || destinoRelativo.includes('\\')) {
+    enviarErro(res, 400, 'path inválido; use /painel/...');
+    return;
+  }
+
+  let corpo;
+  try {
+    const partes = [];
+    let total = 0;
+    for await (const parte of req) {
+      total += parte.length;
+      if (total > 2 * 1024 * 1024) throw new Error('arquivo maior que 2 MB');
+      partes.push(parte);
+    }
+    corpo = Buffer.concat(partes);
+  } catch (erro) {
+    enviarErro(res, 400, erro instanceof Error ? erro.message : String(erro));
+    return;
+  }
+
+  try {
+    const request = new Request(`http://mock${req.url}`, {
+      method: 'POST',
+      headers: { 'content-type': String(req.headers['content-type'] ?? '') },
+      body: corpo
+    });
+    const form = await request.formData();
+    const arquivo = form.get('arquivo');
+    if (!arquivo || typeof arquivo.arrayBuffer !== 'function') {
+      enviarErro(res, 400, 'campo multipart "arquivo" ausente');
+      return;
+    }
+    const base = path.resolve(PAINEL_DIST);
+    const destino = path.resolve(base, destinoRelativo.slice('/painel/'.length));
+    if (destino !== base && !destino.startsWith(base + path.sep)) {
+      enviarErro(res, 400, 'destino inválido');
+      return;
+    }
+    await mkdir(path.dirname(destino), { recursive: true });
+    const bytes = Buffer.from(await arquivo.arrayBuffer());
+    await writeFile(destino, bytes);
+    enviarJson(res, 200, { ok: true, bytes: bytes.length, path: destinoRelativo });
+  } catch (erro) {
+    enviarErro(res, 400, `multipart inválido: ${erro instanceof Error ? erro.message : String(erro)}`);
+  }
+}
+
 /**
  * Handler HTTP do mock.
  * @param {http.IncomingMessage} req
@@ -206,6 +354,16 @@ export async function handler(req, res) {
   const metodo = req.method ?? 'GET';
 
   try {
+    if (metodo === 'GET' && (url.pathname === '/painel' || url.pathname.startsWith('/painel/'))) {
+      await servirPainel(req, res, url.pathname);
+      return;
+    }
+
+    if (metodo === 'POST' && rota === '/api/painel/upload') {
+      await uploadPainel(req, res, url);
+      return;
+    }
+
     if (metodo === 'GET' && (rota === '/' || rota === '/mock')) {
       res.writeHead(200, {
         'Content-Type': 'text/plain; charset=utf-8',
@@ -215,6 +373,8 @@ export async function handler(req, res) {
         [
           '🤖 Mock do ESP32-S3 (NFC) — sem hardware',
           '',
+          'GET  /painel/                → painel completo (painel-dist)',
+          'POST /api/painel/upload      → upload multipart do painel (Basic auth)',
           'GET  /api/ultimo',
           'GET  /api/status',
           'GET  /api/cartoes',
@@ -406,6 +566,7 @@ export async function iniciar({ port = DEFAULT_PORT } = {}) {
   process.stdout.write('🤖 Mock do ESP32-S3 NFC (simulador em memória)\n');
   process.stdout.write(`${linha}\n`);
   process.stdout.write(`   API     : http://localhost:${port}/api/ultimo\n`);
+  process.stdout.write(`   Painel  : http://localhost:${port}/painel/ (após painel:upload)\n`);
   process.stdout.write(`   Simular : http://localhost:${port}/mock/ler?uid=04:A2:B3:C4\n`);
   process.stdout.write(`   Estado  : http://localhost:${port}/mock/estado\n`);
   process.stdout.write('   Pare com Ctrl+C.\n');

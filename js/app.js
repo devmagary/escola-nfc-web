@@ -4,7 +4,7 @@
 // URL/chave do Supabase em nenhum navegador.
 // =====================================================================
 
-import { obterConfiguracao, obterUrlEsp, definirUrlEsp, aplicarEspDaQuery, lerStorage, salvarStorage, removerStorage } from './lib/config.js';
+import { obterConfiguracao, obterUrlEsp, definirUrlEsp, aplicarEspDaQuery, estaNoPainelEsp, lerStorage, salvarStorage, removerStorage } from './lib/config.js';
 import {
   $, escapeHtml, obterAvatarPadrao, normalizarUid, normalizarTelefone, normalizarTexto,
   formatarDataHora, formatarHora, formatarTelefone, telefoneParaWhatsapp, dataParaInput,
@@ -2267,7 +2267,7 @@ async function testarTudo() {
 
 function salvarEspConfig() {
   const valor = $('cfgEspUrl')?.value || '';
-  const normalizado = definirUrlEsp(valor);
+  const normalizado = estaNoPainelEsp() ? window.location.origin : definirUrlEsp(valor);
   Esp32.configurarEsp(normalizado);
   if ($('cfgEspUrl')) $('cfgEspUrl').value = normalizado;
   if (state.usuario && !Esp32.espEmHttpsBloqueado()) {
@@ -2398,7 +2398,7 @@ async function testarEspModal() {
 
 function salvarEspModal() {
   const valor = $('campoEspUrl')?.value || '';
-  const normalizado = definirUrlEsp(valor);
+  const normalizado = estaNoPainelEsp() ? window.location.origin : definirUrlEsp(valor);
   Esp32.configurarEsp(normalizado);
   if ($('cfgEspUrl')) $('cfgEspUrl').value = normalizado;
   if (state.usuario && !Esp32.espEmHttpsBloqueado()) {

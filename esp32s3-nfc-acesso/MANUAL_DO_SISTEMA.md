@@ -199,6 +199,12 @@ O ESP32 trabalha de forma integrada com a aplicação web escolar ([escola-nfc-w
 * `GET /api/ultimo`:
   * Fornece à tela da Portaria o último cartão lido com contador de sequência (`seq`) para disparo instantâneo da ficha do aluno.
 
+### Rotas do Painel Web (LittleFS):
+* `GET /painel/`: serve o painel web completo (HTML/CSS/JS) na mesma origem da API. É público (o login é feito no Supabase dentro do painel).
+* `GET /painel/...`: serve arquivos estáticos; se existir a versão `.gz` e o navegador aceitar gzip, envia comprimido.
+* `POST /api/painel/upload?path=/painel/...`: recebe um arquivo multipart (campo `arquivo`) e grava no LittleFS. Exige o login Basic do painel da placa (`ADMIN_USUARIO`/`ADMIN_SENHA`).
+* O envio é feito pelo repositório web: `npm run painel:deploy -- --esp http://IP-DO-ESP`.
+
 ### Rotas de Configuração de Wi-Fi:
 * `GET /wifi`: Página de configuração (aberta no modo AP; exige login do painel quando já conectado).
 * `GET /api/wifi/estado`: Modo atual, rede salva, IP, clientes do AP e andamento da tentativa de conexão. **Nunca devolve a senha.**

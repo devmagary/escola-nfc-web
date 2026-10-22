@@ -14,6 +14,9 @@
     "serve": "node scripts/serve-local.mjs",
     "mock": "node scripts/mock-esp.mjs",
     "admin": "node scripts/bootstrap-admin.mjs",
+    "painel:build": "node scripts/painel-build.mjs",
+    "painel:upload": "node scripts/painel-upload.mjs",
+    "painel:deploy": "node scripts/painel-build.mjs && node scripts/painel-upload.mjs",
     "test": "node --test tests/",
     "check": "node scripts/check-syntax.mjs"
   },

@@ -180,6 +180,7 @@ a.link-painel:hover{background:#334155}
 <body>
 <header>
   <h1>⚡ ESP32-S3 NFC Manager</h1>
+  <a class="link-painel" href="/painel/">📊 Painel de Acesso</a>
   <a class="link-painel" href="/wifi">⚙️ Configurar Wi-Fi</a>
   <div class="chips" id="status"><span class="chip">Conectando...</span></div>
 </header>

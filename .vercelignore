@@ -12,3 +12,4 @@ COMO_CONFIGURAR_E_PUBLICAR.md
 .env.*
 .vercel/
 /config.js
+/painel-dist

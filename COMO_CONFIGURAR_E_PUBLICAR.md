@@ -118,7 +118,9 @@ cp .env.example .env.local
 | :--- | :---: | :--- | :--- |
 | `SUPABASE_URL` | ✅ | `npm run build` + `npm run admin` | Project Settings → API → Project URL |
 | `SUPABASE_ANON_KEY` | ✅ | `npm run build` | Project Settings → API → anon public |
-| `ESP_URL` | ❌ | `npm run build` (endereço inicial do leitor) | IP do ESP32 na rede local (padrão `http://nfc.local`) |
+| `ESP_URL` | ❌ | `npm run build` (endereço inicial do leitor) + `npm run painel:upload` | IP do ESP32 na rede local (padrão `http://nfc.local`) |
+| `ESP_ADMIN_USER` | ❌ | `npm run painel:upload` | usuário do painel da placa (padrão `admin`) |
+| `ESP_ADMIN_PASSWORD` | ❌ | `npm run painel:upload` | `ADMIN_SENHA` do firmware (padrão `admin123`; troque) |
 | `APP_ENV` | ❌ | `npm run build` | `production`, `staging`… (padrão `production`) |
 | `APP_VERSION` | ❌ | `npm run build` | ex.: `1.1.0` |
 | `SUPABASE_SERVICE_ROLE_KEY` | ✅ só para `npm run admin` | `scripts/bootstrap-admin.mjs` | Project Settings → API → service_role |
@@ -450,6 +452,23 @@ O estado do simulador é mantido em memória (reinicia ao parar o processo).
 ### 7.7 Acessos remotos
 
 Direção, secretaria e coordenação podem usar o link da Vercel normalmente para cadastrar alunos, consultar relatórios e gerenciar usuários. A operação física da portaria (leitor) é sempre local.
+
+### 7.8 Portaria só com tablet (painel servido pelo ESP32)
+
+Se não houver computador na portaria, a placa pode hospedar o painel completo:
+
+1. Grave o firmware novo (ele inclui as rotas `/painel/` e `/api/painel/upload`).
+2. No computador, com o ESP32 ligado na mesma rede e o `.env.local` preenchido:
+   ```bash
+   npm run painel:deploy -- --esp http://192.168.0.73
+   ```
+   O script gera `painel-dist/` (~185 KB bruto / ~45 KB gzip), envia os arquivos para o LittleFS e valida `http://IP/painel/`.
+3. No tablet, abra `http://192.168.0.73/painel/` (ou `http://nfc.local/painel/` se o mDNS funcionar). Faça login com a conta normal do Supabase.
+4. Crie um atalho na tela inicial e, se possível, reserve um IP fixo para o ESP32 no roteador.
+
+O painel é servido em HTTP pela própria placa e usa a API na **mesma origem** (`/api/...`), então não há mixed content. As chamadas ao Supabase continuam indo direto do tablet para HTTPS. A senha do upload é a `ADMIN_SENHA` do firmware (padrão `admin123`; **troque**). Para atualizar o painel depois, rode `npm run painel:deploy` novamente.
+
+Limitações: o primeiro flash/upload ainda precisa de um computador; webcam e Wake Lock não funcionam em HTTP fora de `localhost` (a portaria não usa webcam; para manter a tela ligada use as configurações do tablet ou um navegador de quiosque). O `WebServer` do ESP32 atende uma requisição por vez: use um tablet na portaria e deixe a Vercel para a gestão.
 
 ---
 

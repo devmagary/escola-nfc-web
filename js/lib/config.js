@@ -87,7 +87,22 @@ export function removerStorage(chave) {
   } catch (_) { /* ignora */ }
 }
 
+// O painel servido pelo próprio ESP32 usa a mesma origem para a API.
+// Ex.: http://192.168.0.73/painel/ → API em http://192.168.0.73/api/...
+export function caminhoEhPainelEsp(pathname = '') {
+  return /^\/painel(?:\/|$)/.test(String(pathname || ''));
+}
+
+export function estaNoPainelEsp() {
+  try {
+    return caminhoEhPainelEsp(window.location.pathname);
+  } catch (_) {
+    return false;
+  }
+}
+
 export function obterUrlEsp(configuracao) {
+  if (estaNoPainelEsp()) return window.location.origin;
   const salva = lerStorage(CHAVE_ESP, '');
   return normalizarUrlEsp(salva || configuracao?.espUrl || 'http://nfc.local');
 }
@@ -101,6 +116,7 @@ export function definirUrlEsp(url) {
 // Permite configurar um tablet via link: .../#/portaria?esp=http://192.168.0.73
 export function aplicarEspDaQuery() {
   try {
+    if (estaNoPainelEsp()) return '';
     const params = new URLSearchParams(window.location.search);
     const esp = params.get('esp');
     if (!esp) return '';

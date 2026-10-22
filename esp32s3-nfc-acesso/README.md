@@ -25,6 +25,24 @@ Firmware do controlador de acesso (ESP32-S3 N16R8 + leitor PN532) que conversa c
 
 Se a placa não encontrar a rede salva, ela cria o AP **`ControleAcesso-S3`** e o portal cativo abre a página `/wifi`: escolha a rede 2,4 GHz, digite a senha e a placa salva na NVS e reinicia conectada. O passo a passo está na seção 5.3 do manual.
 
+## Painel web no próprio ESP32
+
+O firmware inclui as rotas:
+
+- `GET /painel/` — painel web completo (HTML/CSS/JS) servido do LittleFS, na mesma origem da API;
+- `GET /painel/...` — arquivos estáticos (aceita `.gz`, com `Content-Encoding: gzip`);
+- `POST /api/painel/upload?path=/painel/...` — upload multipart, protegido pelo login Basic do painel da placa.
+
+No repositório web, rode:
+
+```bash
+npm run painel:deploy -- --esp http://IP-DO-ESP
+```
+
+O pacote tem ~185 KB (ou ~45 KB gzip) e cabe na partição LittleFS/FAT de 8–9,9 MB. O upload usa `ADMIN_USUARIO`/`ADMIN_SENHA` do firmware; troque a senha padrão. Após enviar, o tablet abre `http://IP-DO-ESP/painel/` e continua falando direto com o Supabase.
+
+Para atualizar só o painel (sem regravar o firmware), repita `npm run painel:deploy`. Se a partição de dados for alterada, envie novamente. O `WebServer` atende uma requisição por vez; para uma portaria com um tablet, o custo é pequeno, e a decisão de acesso do NFC continua no Core 0, independente do servidor web.
+
 ## Observações de rádio
 
 - Wi-Fi **4** (802.11 b/g/n) **somente em 2,4 GHz** — o ESP32-S3 não conecta em redes Wi-Fi 5/6 (5 GHz).

@@ -11,6 +11,7 @@ O site **não pede URL nem chave do Supabase em nenhum navegador**. A configura�
 * **Operação offline no ESP32-S3:** o leitor mantém a base de cartões na memória Flash (`cartoes.json`) e continua liberando/bloqueando mesmo sem internet. A sincronização é feita pelo painel (envio imediato ao salvar/bloquear e o botão **Sincronizar base**).
 * **Resiliência do painel:** acessos de alunos identificados que não conseguem ser gravados na nuvem ficam numa fila local no navegador (até 200 eventos) e são reenviados quando a conexão volta. Tentativas de cartão não cadastrado não ocupam essa fila.
 * **Monitoramento remoto:** a portaria grava os acessos no Supabase e a direção acompanha o histórico pelo link da Vercel, com Realtime e atualização automática a cada 10 segundos — sem precisar acessar a rede local.
+* **Painel no próprio ESP32 (opcional, para tablet-only):** o firmware pode servir o painel em `http://IP-DO-ESP/painel/`, usando a mesma origem da API. Um script envia os arquivos para o LittleFS; depois a portaria não precisa de computador ligado.
 * **Secretaria digital:** cadastro de alunos com foto (webcam ou arquivo, compactada no navegador), matrícula, turma, curso, responsável, telefone e UID NFC.
 * **Histórico e relatórios:** filtros por período, nome/turma/UID e status, paginação, atualização em tempo real (Supabase Realtime) e exportação CSV.
 * **Importação/exportação CSV:** modelo pronto para baixar, prévia com validação linha a linha, importação em lote e exportação de alunos e histórico.
@@ -37,7 +38,8 @@ window.__APP_CONFIG__ = Object.freeze({
 | :--- | :---: | :--- | :--- |
 | `SUPABASE_URL` | ✅ | URL do projeto Supabase (`https://xxxx.supabase.co`) | build e `npm run admin` |
 | `SUPABASE_ANON_KEY` | ✅ | chave pública usada pelo navegador (protegida pelo RLS) | build |
-| `ESP_URL` | ❌ | endereço inicial do leitor (padrão `http://nfc.local`) | build |
+| `ESP_URL` | ❌ | endereço inicial do leitor (padrão `http://nfc.local`) | build e `npm run painel:upload` |
+| `ESP_ADMIN_USER`, `ESP_ADMIN_PASSWORD` | ❌ | login do painel da placa para enviar o painel | apenas `.env.local` |
 | `APP_ENV` | ❌ | ambiente exibido no painel (padrão `production`) | build |
 | `APP_VERSION` | ❌ | versão exibida no painel (padrão `1.1.0`) | build |
 | `SUPABASE_SERVICE_ROLE_KEY` | ✅ só para `npm run admin` | cria/repair do primeiro admin — **nunca vai para o navegador** | apenas `.env.local` |
@@ -63,8 +65,11 @@ escola-nfc-web/
 │   ├── build-config.mjs            # gera config.js a partir das variáveis de ambiente
 │   ├── bootstrap-admin.mjs         # cria o primeiro admin (service role, só local)
 │   ├── serve-local.mjs             # servidor HTTP do totem (porta 5500)
-│   ├── mock-esp.mjs                # ESP32 simulado (porta 8787)
+│   ├── painel-build.mjs            # monta painel-dist/ (HTML/CSS/JS + gzip)
+│   ├── painel-upload.mjs           # envia o painel ao LittleFS do ESP32
+│   ├── mock-esp.mjs                # ESP32 simulado (porta 8787, inclui /painel/)
 │   └── check-syntax.mjs            # node --check em js/ e scripts/
+├── painel-dist/                    # gerado por npm run painel:build (ignorado no git)
 ├── tests/                          # testes com node:test (sem dependências)
 ├── supabase_setup.sql              # instalação NOVA do banco (idempotente)
 ├── supabase/migrations/
@@ -179,6 +184,24 @@ A direção pode entrar no link da Vercel com uma conta **Direção** ou **Admin
 
 O dispositivo da portaria (computador/tablet com o painel local) precisa estar **ligado, online e com a página aberta/logada** — ele é a ponte entre o leitor e a nuvem. Se a internet cair, os acessos de alunos identificados ficam na fila e aparecem no histórico remoto quando sincronizarem. O painel embutido do ESP32 (`http://<ip>/`) não grava no Supabase; para monitoramento remoto use o painel completo.
 
+### Portaria só com tablet (painel no ESP32)
+
+Se não houver computador na portaria, o próprio ESP32 pode hospedar o painel:
+
+```bash
+npm run painel:deploy -- --esp http://192.168.0.73
+```
+
+Depois, no tablet (na mesma rede Wi-Fi 2,4 GHz do ESP32), abra:
+
+```
+http://192.168.0.73/painel/
+```
+
+O painel completo continua falando **direto com o Supabase**; a placa só entrega HTML/CSS/JS e responde à API local. O pacote tem ~185 KB (ou ~45 KB gzip) e é servido do LittleFS. A senha do upload é a `ADMIN_SENHA` do painel da placa (padrão `admin123`; troque antes de usar). Para atualizar o painel depois, rode novamente `npm run painel:deploy`.
+
+O primeiro envio/flash ainda precisa de um computador. Recomenda-se reservar um IP fixo no roteador e criar um atalho na tela inicial do tablet. Webcam/Wake Lock não funcionam em HTTP fora de `localhost`; a portaria não usa webcam.
+
 Manual completo de implantação: **[COMO_CONFIGURAR_E_PUBLICAR.md](COMO_CONFIGURAR_E_PUBLICAR.md)**.
 
 ## 🔐 Segurança e segredos
@@ -200,8 +223,11 @@ Manual completo de implantação: **[COMO_CONFIGURAR_E_PUBLICAR.md](COMO_CONFIGU
 | `npm run dev` | Gera `config.js` e sobe o servidor local em `http://localhost:5500` |
 | `npm run totem` | Sobe apenas o servidor local HTTP (`PORT` opcional, padrão 5500) |
 | `npm run serve` | Mesmo que `npm run totem` |
-| `npm run mock` | ESP32 simulado em `http://localhost:8787` (sem hardware) |
+| `npm run mock` | ESP32 simulado em `http://localhost:8787` (sem hardware), incluindo `/painel/` |
 | `npm run admin` | Cria/repara o primeiro administrador (usa a service role key local) |
+| `npm run painel:build` | Gera `painel-dist/` com HTML/CSS/JS e versões `.gz` |
+| `npm run painel:upload -- --esp http://IP` | Envia o painel para o LittleFS do ESP32 |
+| `npm run painel:deploy -- --esp http://IP` | Gera e envia o painel em um comando |
 | `npm test` | Executa os testes automatizados |
 | `npm run check` | Verifica a sintaxe de `js/` e `scripts/` |
 

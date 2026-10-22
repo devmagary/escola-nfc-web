@@ -110,6 +110,11 @@ const char* ARQ_CARTOES   = "/cartoes.json";
 const char* ARQ_HISTORICO = "/historico.json";
 #define MAX_HISTORICO_LOG 50
 
+// Painel web completo (HTML/CSS/JS) servido pela própria placa.
+// Os arquivos são enviados por scripts/painel-upload.mjs para o LittleFS.
+const char* PASTA_PAINEL = "/painel";
+#define PAINEL_MAX_ARQUIVO (512 * 1024)
+
 // =====================================================================
 // Objetos e Estado Global
 // =====================================================================
@@ -148,6 +153,15 @@ bool     scanCacheValido = false;
 // Ponteiro universal para o sistema de arquivos (LittleFS ou FFat)
 fs::FS* fsPtr = nullptr;
 const char* nomeFsAtivo = "Nenhum";
+void garantirPastasPainel();
+
+// Upload do painel web (multipart) para o LittleFS.
+File    painelUploadArquivo;
+String  painelUploadCaminho = "";
+String  painelUploadErro = "";
+size_t  painelUploadBytes = 0;
+bool    painelUploadAutorizado = false;
+bool    painelUploadFalhou = false;
 
 // Sincronização entre Cores (Core 0 para NFC, Core 1 para Web)
 SemaphoreHandle_t  travaDados;
@@ -430,6 +444,8 @@ void inicializarArquivosDados() {
     Serial.println("[AVISO] Gravacao na Flash desativada temporariamente ate ajustar a particao.");
     return;
   }
+
+  garantirPastasPainel();
 
   // Verifica se o arquivo de cartões existe; caso contrário cria o padrão inicial
   if (!fsPtr->exists(ARQ_CARTOES)) {
@@ -1551,8 +1567,198 @@ void rotaOtaUpload() {
   }
 }
 
+// =====================================================================
+// Painel web completo servido pela placa (LittleFS)
+// =====================================================================
+
+String mimeDoPainel(const String& caminho) {
+  int ponto = caminho.lastIndexOf('.');
+  String ext = ponto >= 0 ? caminho.substring(ponto + 1) : "";
+  ext.toLowerCase();
+
+  if (ext == "html") return "text/html; charset=utf-8";
+  if (ext == "css")  return "text/css; charset=utf-8";
+  if (ext == "js" || ext == "mjs") return "text/javascript; charset=utf-8";
+  if (ext == "json" || ext == "map") return "application/json; charset=utf-8";
+  if (ext == "svg")  return "image/svg+xml";
+  if (ext == "png")  return "image/png";
+  if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
+  if (ext == "webp") return "image/webp";
+  if (ext == "ico")  return "image/x-icon";
+  if (ext == "woff") return "font/woff";
+  if (ext == "woff2") return "font/woff2";
+  return "application/octet-stream";
+}
+
+String normalizarCaminhoPainel(String valor, bool permitirIndex) {
+  int interrogacao = valor.indexOf('?');
+  if (interrogacao >= 0) valor = valor.substring(0, interrogacao);
+  valor.trim();
+
+  if (valor == "/painel" || valor == "/painel/") {
+    return permitirIndex ? String("/painel/index.html") : String("");
+  }
+  if (!valor.startsWith("/painel/")) return "";
+  if (valor.indexOf("..") >= 0 || valor.indexOf('\\') >= 0) return "";
+  return valor;
+}
+
+void garantirPastasPainel() {
+  if (!fsPtr) return;
+  fsPtr->mkdir("/painel");
+  fsPtr->mkdir("/painel/js");
+  fsPtr->mkdir("/painel/js/lib");
+  fsPtr->mkdir("/painel/js/services");
+}
+
+bool servirArquivoPainel(const String& uri) {
+  if (!fsPtr) {
+    server.send(503, "text/plain; charset=utf-8", "Memoria Flash indisponivel.");
+    return true;
+  }
+
+  String caminho = normalizarCaminhoPainel(uri, true);
+  if (caminho.isEmpty()) {
+    server.send(400, "text/plain; charset=utf-8", "Caminho invalido.");
+    return true;
+  }
+
+  String envio = caminho;
+  bool usarGzip = false;
+  String aceita = server.header("Accept-Encoding");
+  if (aceita.indexOf("gzip") >= 0 && fsPtr->exists((caminho + ".gz").c_str())) {
+    envio = caminho + ".gz";
+    usarGzip = true;
+  }
+
+  if (!fsPtr->exists(envio.c_str())) {
+    server.send(404, "text/plain; charset=utf-8",
+                "Painel ainda nao enviado. Rode: npm run painel:deploy");
+    return true;
+  }
+
+  File arquivo = fsPtr->open(envio.c_str(), "r");
+  if (!arquivo) {
+    server.send(500, "text/plain; charset=utf-8", "Falha ao abrir o arquivo do painel.");
+    return true;
+  }
+
+  if (usarGzip) server.sendHeader("Content-Encoding", "gzip");
+  server.sendHeader("Vary", "Accept-Encoding");
+  // O painel e atualizado por upload; sem cache evita rodar JS antigo.
+  server.sendHeader("Cache-Control", "no-store, max-age=0");
+  String tipo = mimeDoPainel(caminho);
+  server.streamFile(arquivo, tipo.c_str());
+  arquivo.close();
+  return true;
+}
+
+void rotaPainelSemBarra() {
+  server.sendHeader("Location", "/painel/");
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(302, "text/plain", "Redirecionando para /painel/");
+}
+
+void rotaUploadPainelFinal() {
+  if (!painelUploadAutorizado) {
+    server.requestAuthentication(BASIC_AUTH, "ESP32-S3 NFC");
+    return;
+  }
+
+  if (painelUploadFalhou) {
+    String resposta = String("{\"ok\":false,\"erro\":\"") + painelUploadErro + "\"}";
+    server.send(400, "application/json; charset=utf-8", resposta);
+    return;
+  }
+
+  String resposta = String("{\"ok\":true,\"bytes\":") + String(painelUploadBytes) + "}";
+  server.send(200, "application/json; charset=utf-8", resposta);
+}
+
+void rotaUploadPainelArquivo() {
+  HTTPUpload& upload = server.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    painelUploadAutorizado = server.authenticate(ADMIN_USUARIO, ADMIN_SENHA);
+    painelUploadFalhou = false;
+    painelUploadErro = "";
+    painelUploadBytes = 0;
+    painelUploadCaminho = "";
+
+    if (!painelUploadAutorizado) return;
+
+    if (!fsPtr) {
+      painelUploadFalhou = true;
+      painelUploadErro = "Flash indisponivel";
+      return;
+    }
+
+    String destino = normalizarCaminhoPainel(server.arg("path"), false);
+    if (destino.isEmpty()) {
+      painelUploadFalhou = true;
+      painelUploadErro = "path invalido";
+      return;
+    }
+
+    garantirPastasPainel();
+    painelUploadCaminho = destino + ".tmp";
+    if (fsPtr->exists(painelUploadCaminho.c_str())) fsPtr->remove(painelUploadCaminho.c_str());
+    painelUploadArquivo = fsPtr->open(painelUploadCaminho.c_str(), "w");
+    if (!painelUploadArquivo) {
+      painelUploadFalhou = true;
+      painelUploadErro = "falha ao criar arquivo temporario";
+    }
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (!painelUploadAutorizado || painelUploadFalhou) return;
+
+    if (painelUploadBytes + upload.currentSize > PAINEL_MAX_ARQUIVO) {
+      painelUploadFalhou = true;
+      painelUploadErro = "arquivo maior que 512 KB";
+      if (painelUploadArquivo) painelUploadArquivo.close();
+      if (fsPtr && fsPtr->exists(painelUploadCaminho.c_str())) fsPtr->remove(painelUploadCaminho.c_str());
+      return;
+    }
+
+    if (!painelUploadArquivo ||
+        painelUploadArquivo.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      painelUploadFalhou = true;
+      painelUploadErro = "falha ao gravar na Flash";
+      if (painelUploadArquivo) painelUploadArquivo.close();
+      if (fsPtr && fsPtr->exists(painelUploadCaminho.c_str())) fsPtr->remove(painelUploadCaminho.c_str());
+      return;
+    }
+    painelUploadBytes += upload.currentSize;
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (!painelUploadAutorizado) return;
+    if (painelUploadArquivo) painelUploadArquivo.close();
+
+    if (!painelUploadFalhou && !painelUploadCaminho.isEmpty()) {
+      String destino = painelUploadCaminho;
+      destino.remove(destino.length() - 4); // remove ".tmp"
+      if (fsPtr->exists(destino.c_str())) fsPtr->remove(destino.c_str());
+      if (!fsPtr->rename(painelUploadCaminho.c_str(), destino.c_str())) {
+        painelUploadFalhou = true;
+        painelUploadErro = "falha ao renomear o arquivo";
+      }
+    }
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    if (painelUploadArquivo) painelUploadArquivo.close();
+    if (fsPtr && !painelUploadCaminho.isEmpty() && fsPtr->exists(painelUploadCaminho.c_str())) {
+      fsPtr->remove(painelUploadCaminho.c_str());
+    }
+    painelUploadFalhou = true;
+    painelUploadErro = "upload abortado";
+  }
+}
+
 void configurarRotasServidor() {
   server.on("/",              HTTP_GET,    rotaPaginaPrincipal);
+
+  // Painel web completo servido pela placa (mesma origem da API).
+  server.on("/painel",        HTTP_GET,    rotaPainelSemBarra);
+  server.on("/painel/",       HTTP_GET,    []() { servirArquivoPainel("/painel/"); });
+  server.on("/api/painel/upload", HTTP_POST, rotaUploadPainelFinal, rotaUploadPainelArquivo);
+
   server.on("/api/cartoes",   HTTP_GET,    rotaListarCartoes);
   server.on("/api/cartoes",   HTTP_POST,   rotaAdicionarCartao);
   server.on("/api/cartoes",   HTTP_PUT,    rotaAtualizarCartao);
@@ -1594,6 +1800,12 @@ void configurarRotasServidor() {
       server.sendHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
       server.sendHeader("Access-Control-Allow-Headers", "*");
       server.send(204);
+      return;
+    }
+
+    // Arquivos estáticos do painel (/painel/style.css, /painel/js/app.js...).
+    if (server.method() == HTTP_GET && server.uri().startsWith("/painel/")) {
+      servirArquivoPainel(server.uri());
       return;
     }
     // No modo AP, qualquer endereço desconhecido (menos a API) leva ao portal de configuração

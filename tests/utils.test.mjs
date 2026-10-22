@@ -15,6 +15,8 @@ import {
   escapeHtml,
   formatarTamanho,
   formatarTelefone,
+  gerarId,
+  ehUuid,
   mapearCabecalhoCsv,
   mascararChave,
   normalizarTelefone,
@@ -31,6 +33,7 @@ import {
   normalizarUrlEsp,
   normalizarUrlSupabase,
   validarConfiguracao,
+  caminhoEhPainelEsp,
 } from '../js/lib/config.js';
 
 // ---------------------------------------------------------------------------
@@ -187,6 +190,22 @@ test('formatarTamanho converte bytes', () => {
 // ---------------------------------------------------------------------------
 // Configuração
 // ---------------------------------------------------------------------------
+test('gerarId produz UUID v4 válido mesmo sem crypto.randomUUID', () => {
+  const id = gerarId();
+  assert.equal(ehUuid(id), true);
+  assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  assert.equal(ehUuid('hist-1792681181831-c934e5a7218938'), false);
+});
+
+test('caminhoEhPainelEsp reconhece o painel servido pela placa', () => {
+  assert.equal(caminhoEhPainelEsp('/painel/'), true);
+  assert.equal(caminhoEhPainelEsp('/painel'), true);
+  assert.equal(caminhoEhPainelEsp('/painel/js/app.js'), true);
+  assert.equal(caminhoEhPainelEsp('/'), false);
+  assert.equal(caminhoEhPainelEsp('/painelx/'), false);
+  assert.equal(caminhoEhPainelEsp('/outra/painel/'), false);
+});
+
 test('normalizarUrlSupabase remove sufixos de API e barra final', () => {
   assert.equal(normalizarUrlSupabase('https://abc.supabase.co'), 'https://abc.supabase.co');
   assert.equal(normalizarUrlSupabase('https://abc.supabase.co/'), 'https://abc.supabase.co');

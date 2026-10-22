@@ -4,6 +4,7 @@
 // =====================================================================
 
 import { obterConfiguracao, normalizarUrlSupabase } from '../lib/config.js';
+import { gerarId, ehUuid } from '../lib/utils.js';
 
 let cliente = null;
 let canalHistorico = null;
@@ -267,6 +268,9 @@ export function prepararEventoHistorico(evento) {
   colunas.forEach((coluna) => {
     if (evento[coluna] !== undefined) payload[coluna] = evento[coluna];
   });
+  // A coluna id é UUID. Em HTTP local o fallback antigo gerava "hist-...",
+  // que o Postgres rejeitava; garante um UUID válido também para a fila antiga.
+  if (!payload.id || !ehUuid(payload.id)) payload.id = gerarId();
   payload.tipo_evento = evento.tipo_evento || 'ENTRADA';
   payload.status = evento.status || 'NEGADO';
   return payload;

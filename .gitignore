@@ -11,6 +11,8 @@ build/
 # Configuração gerada em tempo de build (scripts/build-config.mjs)
 # Apenas o config.js da RAIZ é gerado; js/lib/config.js é código-fonte.
 /config.js
+# Pacote do painel enviado ao ESP32 (gerado por scripts/painel-build.mjs)
+/painel-dist
 
 # Variáveis de ambiente e chaves locais (mantém apenas o modelo)
 .env*
