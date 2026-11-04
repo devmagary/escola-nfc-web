@@ -13,6 +13,8 @@ build/
 /config.js
 # Pacote do painel enviado ao ESP32 (gerado por scripts/painel-build.mjs)
 /painel-dist
+# Dump de dados do laboratório (npm run lab:backup)
+/supabase/backup.sql
 
 # Variáveis de ambiente e chaves locais (mantém apenas o modelo)
 .env*
