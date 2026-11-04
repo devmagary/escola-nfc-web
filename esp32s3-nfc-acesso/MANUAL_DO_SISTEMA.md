@@ -63,6 +63,11 @@ O módulo PN532 possui duas pequenas chavinhas brancas numeradas **1** e **2**. 
 | **GND** | **GND** | Terra (Negativo) | Referência elétrica comum. |
 | **SDA** | **GPIO 8** (Barra amarela) | Dados I2C | Linha de comunicação de dados. |
 | **SCL** | **GPIO 9** (Barra amarela) | Clock I2C | Linha de sincronismo do barramento I2C. |
+| **RST** (RSTPD) | **GPIO 5** | Reset do módulo | **Obrigatório para a recuperação automática.** O firmware pulsa este pino no `begin()`; sem ele, um PN532 travado só volta desligando a alimentação. |
+| **IRQ** | **GPIO 2** (opcional) | Interrupção | Em I2C a biblioteca consulta o byte RDY e não usa a IRQ; ligar evita um fio solto e melhora a imunidade. |
+
+> [!WARNING]
+> **Não deixe o pino RST do PN532 solto.** O firmware já usa **GPIO 5** como reset (é o que permite reconectar sozinho quando o módulo para de responder). Com apenas 4 fios, o RST fica flutuando e o módulo pode travar depois de alguns cartões — sintoma clássico de “funcionou duas vezes e parou”. Ligue **RST → GPIO 5** e **IRQ → GPIO 2** (IRQ opcional).
 
 > [!WARNING]
 > **Pinos Protegidos no S3 N16R8:**
@@ -166,7 +171,7 @@ Recomendações fixas de montagem: **VCC em 3V3** (não 5 V), chaves **1=ON e 2=
 
 ### 5.1.2. Diagnóstico de engasgos (`/api/diagnostico`)
 
-A instrumentação entrou na **2.0.0-diag** e continua na versão atual (**2.1.1-diag**), sem alterar as funções:
+A instrumentação entrou na **2.0.0-diag** e continua na versão atual (**2.1.2-diag**), sem alterar as funções:
 
 * mede o **gap entre iterações do loop**, tempo de `server.handleClient()`, processamento de cartão e operações de Flash;
 * registra no console eventos acima dos limiares: loop > 50 ms, HTTP > 80 ms, NFC > 50 ms, FS > 25 ms;
@@ -218,11 +223,12 @@ Se a placa não encontrar a rede salva (escola mudou a senha, roteador novo, pri
 
 ### 5.4. Cache de cartões e histórico na PSRAM (2.1.x)
 
-Na versão **2.1.1-diag**, validar o cartão e consultar o histórico deixaram de tocar a Flash a cada acesso:
+Na versão **2.1.2-diag**, validar o cartão e consultar o histórico deixaram de tocar a Flash a cada acesso:
 
 * **Índice de cartões em RAM:** `cartoes.json` é lido uma vez no boot e mantido em PSRAM/heap; cada aproximação vira uma busca em memória. O índice é reconstruído em toda rota que grava a base (cadastro, edição, exclusão, sincronização e restauração de backup).
 * **Histórico em lista circular de 50 eventos na RAM:** `GET /api/log` responde da memória, sem os ~39 ms de leitura da Flash por poll do painel.
-* **Gravação em lote:** o histórico é gravado na Flash no máximo a cada **~1,5 s** e é descarregado antes de reiniciar (comando, OTA e troca de Wi-Fi).
+* **Gravação em lote:** o histórico vai para a Flash **quando o fluxo de cartões para** (3 s sem leitura), juntando uma fila inteira numa única gravação (cada gravação nesta placa custa ~386 ms). Também é descarregado antes de reiniciar (comando, OTA e troca de Wi-Fi).
+* **I2C × Flash:** gravações na SPI flash suspendem os dois núcleos, então o firmware serializa a gravação com as transações do PN532 (uma trava dedicada) e recupera o barramento (9 pulsos de clock) antes de reconectar. Isso evita deixar o módulo sem resposta no meio de uma leitura.
 * **Tempo de validação visível:** cada acesso no log agora termina com `| validacao X ms`, que é só a busca no índice em RAM (0–1 ms mesmo com a base inteira). O `/api/status` expõe `nfc_ultimo_ms` e `cartoes_ram`/`historico_ram` para conferir o cache de fora.
 * **Fallback:** se faltar PSRAM/heap, o firmware volta ao comportamento antigo (lê e grava direto na Flash).
 

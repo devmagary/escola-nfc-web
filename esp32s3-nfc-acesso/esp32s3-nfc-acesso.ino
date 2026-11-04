@@ -112,7 +112,7 @@ const char* ARQ_HISTORICO = "/historico.json";
 #define MAX_HISTORICO_LOG 50
 
 // Versão desta build de diagnóstico (aparece em /api/status e /api/diagnostico).
-#define FW_VERSAO "2.1.1-diag"
+#define FW_VERSAO "2.1.2-diag"
 
 // Limiares do diagnóstico de desempenho (ms). Eventos acima disso são
 // registrados no buffer circular e, com rate-limit, no console.
@@ -187,6 +187,10 @@ SemaphoreHandle_t  travaLog = nullptr;
 SemaphoreHandle_t  travaDiag = nullptr;
 // Protege o "último cartão" (Strings escritas no Core 0 e lidas pelo Core 1).
 SemaphoreHandle_t  travaUltimo = nullptr;
+// Evita que uma gravação na SPI flash comece no meio de uma transação I2C do
+// PN532: gravar na flash desliga o cache para os DOIS núcleos, e a transação
+// interrompida podia deixar o módulo sem responder até o próximo reset.
+SemaphoreHandle_t  travaNfcFlash = nullptr;
 
 // Dono único do barramento I2C/PN532: somente a tarefa NFC (Core 0) fala com o
 // módulo. O Core 1 apenas registra um pedido de diagnóstico e lê o resultado
@@ -559,10 +563,18 @@ void imprimirDiagnosticoFlash() {
 bool salvarJsonNoArquivo(const char* caminho, const JsonDocument& doc) {
   if (!fsPtr) return false;
   uint32_t inicio = micros();
+
+  if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
+  bool gravou = false;
   File arq = fsPtr->open(caminho, "w");
-  if (!arq) return false;
-  serializeJson(doc, arq);
-  arq.close();
+  if (arq) {
+    serializeJson(doc, arq);
+    arq.close();
+    gravou = true;
+  }
+  if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
+
+  if (!gravou) return false;
 
   uint32_t durMs = (micros() - inicio) / 1000;
   if (durMs > diagFsMaxMs) diagFsMaxMs = durMs;
@@ -616,6 +628,7 @@ HistoricoRam* historicoRam = nullptr;
 uint16_t      historicoRamTotal = 0;
 bool          historicoSujo = false;
 uint32_t      historicoUltimaGravacaoMs = 0;
+uint32_t      historicoUltimoEventoMs = 0; // último cartão: grava só quando o fluxo parar
 uint32_t      historicoSeqGerado = 0; // detecta eventos novos durante a gravação
 
 void* alocarRamPreferindoPsram(size_t bytes) {
@@ -734,6 +747,7 @@ void adicionarHistoricoRam(const String& uid, const String& nome, uint8_t res) {
   historicoRamTotal = total;
   historicoSeqGerado++;
   historicoSujo = true;
+  historicoUltimoEventoMs = millis();
   if (historicoUltimaGravacaoMs == 0) historicoUltimaGravacaoMs = millis();
 }
 
@@ -741,7 +755,12 @@ void adicionarHistoricoRam(const String& uid, const String& nome, uint8_t res) {
 // flash). Roda no Core 1; a cópia é feita sob a trava de dados.
 void gravarHistoricoInterno(bool forcar) {
   if (!historicoSujo || !historicoRam || !fsPtr) return;
-  if (!forcar && millis() - historicoUltimaGravacaoMs < 1500) return;
+  if (!forcar) {
+    // Espera o "movimento" acabar: um cartão isolado ou uma fila de alunos vira
+    // UMA gravação (386 ms cada nesta flash), e não uma por cartão.
+    if (millis() - historicoUltimoEventoMs < 3000) return;
+    if (millis() - historicoUltimaGravacaoMs < 1500) return;
+  }
 
   JsonDocument doc;
   uint32_t seqDaCopia;
@@ -883,6 +902,31 @@ void atualizarSaidaFechadura() {
 // Lógica de Validação e Leitura NFC (Executada no Core 0)
 // =====================================================================
 
+// Libera um barramento I2C preso: o PN532 pode segurar SDA em LOW depois de uma
+// transação interrompida. São 9 pulsos de clock + STOP, o procedimento padrão.
+void recuperarBarramentoI2C() {
+  pinMode(SDA_PIN, INPUT_PULLUP);
+  pinMode(SCL_PIN, OUTPUT);
+  digitalWrite(SCL_PIN, HIGH);
+  delayMicroseconds(5);
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(SCL_PIN, LOW);
+    delayMicroseconds(5);
+    digitalWrite(SCL_PIN, HIGH);
+    delayMicroseconds(5);
+  }
+  pinMode(SDA_PIN, OUTPUT);
+  digitalWrite(SDA_PIN, LOW);
+  delayMicroseconds(5);
+  digitalWrite(SCL_PIN, HIGH);
+  delayMicroseconds(5);
+  digitalWrite(SDA_PIN, HIGH);
+  delayMicroseconds(5);
+  pinMode(SDA_PIN, INPUT_PULLUP);
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setTimeOut(50);
+}
+
 bool iniciarPN532(bool verboso) {
   nfc.begin();
   uint32_t versiondata = nfc.getFirmwareVersion();
@@ -1012,6 +1056,8 @@ void atenderPedidoNfc() {
   uint32_t pedido = pedidoNfcSeq;
   if (pedidoNfcSeq == pedido) pedidoNfcPendente = NFC_SEM_PEDIDO;
 
+  if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
+
   String resposta;
   bool ok = false;
   uint32_t v = nfc.getFirmwareVersion();
@@ -1055,6 +1101,8 @@ void atenderPedidoNfc() {
     }
   }
 
+  if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
+
   publicarResultadoNfc(resposta, pedido);
   logSerial(resposta, ok ? "ok" : "err");
 }
@@ -1074,10 +1122,16 @@ void tarefaNFC(void* parametro) {
       continue;
     }
 
-    // 1. Se o módulo estiver desconectado, tenta reconectar periodicamente
+    // 1. Se o módulo estiver desconectado, tenta reconectar periodicamente.
+    // A recuperação do barramento + reset do módulo rodam sob a trava para não
+    // colidir com uma gravação na flash (que suspende os dois núcleos).
     if (!nfcOk) {
       vTaskDelay(pdMS_TO_TICKS(1500));
-      if (iniciarPN532(false)) {
+      if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
+      recuperarBarramentoI2C();
+      bool reconectou = iniciarPN532(false);
+      if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
+      if (reconectou) {
         nfcOk = true;
         falhasHeartbeatNfc = 0;
         Serial.println("\n[HARDWARE] Leitor NFC PN532 reconectado com sucesso!");
@@ -1092,12 +1146,14 @@ void tarefaNFC(void* parametro) {
     // Também não sonda logo após uma leitura bem-sucedida: ela já provou que vive.
     if (agora - ultimoHeartbeatNfc >= 5000 && agora - ultimaLeituraOk > 3000) {
       ultimoHeartbeatNfc = agora;
+      if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
       uint32_t versao = nfc.getFirmwareVersion();
+      if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
       if (!versao) {
         if (++falhasHeartbeatNfc >= 3) {
           nfcOk = false;
           falhasHeartbeatNfc = 0;
-          Serial.println("\n[ALERTA HARDWARE] Modulo PN532 parou de responder! Verifique os fios SDA (GPIO 8) e SCL (GPIO 9).");
+          Serial.println("\n[ALERTA HARDWARE] Modulo PN532 parou de responder! Verifique SDA (GPIO 8), SCL (GPIO 9) e a solda do RST no GPIO 5.");
           continue;
         }
       } else {
@@ -1107,8 +1163,10 @@ void tarefaNFC(void* parametro) {
       }
     }
 
-    // 3. Leitura passiva com timeout curto (50ms)
+    // 3. Leitura passiva com timeout curto (50ms), sem gravação de flash em voo.
+    if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
     bool detectado = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uidBuffer, &uidLength, 50);
+    if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
 
     if (detectado && uidLength > 0 && uidLength <= 10) {
       ultimaLeituraOk = millis();
@@ -2597,6 +2655,7 @@ void setup() {
   travaDados = xSemaphoreCreateMutex();
   travaUltimo = xSemaphoreCreateMutex();
   travaResultadoNfc = xSemaphoreCreateMutex();
+  travaNfcFlash = xSemaphoreCreateMutex();
 
 #if PINO_SAIDA >= 0
   pinMode(PINO_SAIDA, OUTPUT);
@@ -2612,7 +2671,9 @@ void setup() {
   Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setTimeOut(50); // Timeout para evitar travamento se os fios do leitor soltarem
   uint32_t marcaNfc = millis();
+  if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
   nfcOk = iniciarPN532(true);
+  if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
   logSerial(String("[BOOT] PN532 ") + (nfcOk ? "OK" : "AUSENTE") + " em " + String(millis() - marcaNfc) + " ms", nfcOk ? "ok" : "err");
 
   // Cria a tarefa de leitura do NFC no CORE 0 ANTES do Wi-Fi: o leitor funciona
