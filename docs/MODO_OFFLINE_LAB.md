@@ -69,9 +69,9 @@ Este runbook é o procedimento operacional do laboratório **Acesso Escolar NFC*
 | `npm run lab:check` | checa config, banco e API (diagnóstico) |
 | `npm run lab:ip` | lista os IPs para usar no tablet |
 | `npm run lab:dev` | gera `config.js` e serve o painel em :5500 |
-| `lab.cmd` (duplo clique) | TUI de menu com barras de estado Docker/Banco/Painel; ações ligar/desligar/checar/endereços/zerar |
-| `lab-ligar.cmd` / `lab-desligar.cmd` / `lab-checar.cmd` | atalhos diretos para as mesmas ações (abrem janela própria; "Ligar" cria a janela dedicada `Painel NFC`) |
-| `lab-criar-atalhos.cmd` | cria os atalhos "Servidor NFC - ..." na área de trabalho |
+| `lab.cmd` (ou o atalho "Servidor NFC") | TUI unificada: luzes ao vivo (Docker/Banco/Painel/Placa) e menu de oito ações (ligar, desligar, checar, abrir painel, endereços, firewall, backup, zerar) |
+| `lab-ligar.cmd` / `lab-desligar.cmd` / `lab-checar.cmd` | atalhos diretos para as mesmas ações ("Ligar" cria a janela dedicada `Painel NFC`) |
+| `lab-criar-atalhos.cmd` | cria o atalho "Servidor NFC" na área de trabalho (e limpa os antigos) |
 | `lab-firewall-liberar.cmd` | libera 54321/5500 na rede privada (eleva sozinho) |
 | `npm run painel:build` / `painel:upload` / `painel:deploy` | empacota/envia o painel para o ESP32 (modo avançado) |
 

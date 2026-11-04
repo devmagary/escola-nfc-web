@@ -4,18 +4,29 @@ Se o Docker Desktop e o projeto ainda não estão instalados, veja [02-instalar-
 
 > **Em leigo:** o laboratório é uma "escola de mentira" que roda dentro do notebook: um banco de dados e um painel. A placa ESP32 fica na mesma rede e conversa com os dois.
 
-## Jeito fácil: atalhos na área de trabalho
+## Jeito fácil: atalho na área de trabalho
 
-Na pasta do projeto existe um montinho de atalhos de duplo clique:
+**Um atalho comanda tudo: "Servidor NFC".** Dê duplo clique nele e abre o **painel de luzes** com o menu completo:
 
-| Atalho | O que faz |
+| Luz no topo | O que mostra |
 |:---|:---|
-| `lab.cmd` | Abre o **menuzinho** com setas: ligar, desligar, checar, endereços e recomeçar. No topo dele há três luzes (`Docker`, `Banco`, `Painel`) mostrando o que está ligado |
-| `lab-ligar.cmd` | Faz sozinho: abre o Docker, espera ligar, sobe o banco e abre uma janela nova chamada **"Painel NFC"** que é o site (não feche essa janela enquanto estiver usando) |
-| `lab-desligar.cmd` | Fecha a janela do painel e guarda o banco. Nada é apagado |
-| `lab-checar.cmd` | O diagnóstico em português, item por item |
+| Docker | O programa que segura o banco ligado |
+| Banco | O Supabase local (o que responde o sistema) |
+| Painel | O site que o tablet usa |
+| Placa | O ESP32 (verde = pronto; amarelo = placa viva mas leitor fora; vermelho = placa sumida) |
 
-Para copiar estes atalhos para a área de trabalho do Windows, dê **um** duplo clique em `lab-criar-atalhos.cmd`. Aparecerão quatro ícones "Servidor NFC - ..." na área de trabalho; a partir daí, você não precisa mais entrar na pasta.
+Itens do menu (setas + Enter, ou número + Enter):
+
+1. **Ligar tudo** — abre o Docker, espera ligar, sobe o banco e abre a janela **"Painel NFC"** (o site; não feche essa janela enquanto estiver usando).
+2. **Desligar tudo** — fecha o painel e guarda o banco. Nada é apagado.
+3. **Checar a saúde** — diagnóstico completo com dicas em português.
+4. **Abrir o painel no navegador** — manda o navegador direto para o site.
+5. **Ver os endereços** — os números para digitar no tablet.
+6. **Liberar o firewall** — pede a permissão de administrador e libera a rede da escola.
+7. **Fazer backup** — salva uma cópia dos dados na pasta do projeto.
+8. **Recomeçar do zero** — APAGA tudo (pede que você digite ZERAR para confirmar).
+
+Aperte **ESC** para sair da tela; o que estiver ligado continua ligado.
 
 Se preferir continuar na mão, o jeito tradicional de janelas está abaixo.
 
