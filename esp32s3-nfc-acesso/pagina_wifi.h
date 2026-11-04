@@ -253,8 +253,12 @@ function selecionarRede(botao, ssid) {
 
 async function escanear(forcar) {
   if (scanando) return;
+  if (!estadoAtual) {
+    $('scanMsg').textContent = 'Verificando o modo da placa...';
+    return;
+  }
   // Em STA a rede já está escolhida e a troca exige "Esquecer rede".
-  if (!estadoAtual || estadoAtual.modo !== 'AP') {
+  if (estadoAtual.modo !== 'AP') {
     $('scanMsg').textContent = 'Placa conectada. Para trocar de rede, use “Esquecer rede” e configure no modo AP.';
     return;
   }

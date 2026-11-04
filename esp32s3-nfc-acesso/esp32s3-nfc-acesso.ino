@@ -157,7 +157,8 @@ struct TentativaWifi {
 uint32_t wifiReiniciarEm = 0;   // 0 = nenhum reinício agendado
 String   wifiIpNovo      = "";
 
-// Cache da varredura de redes exibida na página /wifi
+// Cache da varredura de redes exibida na página /wifi.
+// Invariante: estes campos são tocados SOMENTE pelo Core 1 (loop + rotas HTTP).
 String   scanCacheJson   = "[]";
 uint32_t scanCacheMs     = 0;
 bool     scanCacheValido = false;
@@ -916,6 +917,10 @@ void processarLeituraNfc(String uidFormatado) {
   bool ativo = false;
   String nome = "";
 
+  // Mede apenas a busca: travessia do índice em RAM (ou, no fallback raro, a
+  // leitura da flash). A espera pelas travas e o log/histórico ficam de fora.
+  uint32_t inicioBuscaUs = micros();
+
   // Busca no índice em RAM (sem tocar na flash). Se o índice não pôde ser
   // montado, cai no caminho antigo lendo o arquivo.
   if (cartoesRamValido) {
@@ -947,34 +952,42 @@ void processarLeituraNfc(String uidFormatado) {
   ultimoNomeLido = nome;
   xSemaphoreGive(travaUltimo);
 
-  // Tempo só da validação (busca em RAM), antes do log/histórico. Com o cache
-  // ativo fica em 0-1 ms mesmo com a base inteira de alunos.
-  uint32_t durValidacaoMs = (micros() - inicioUs) / 1000;
+  // Com o cache ativo fica em 0-1 ms mesmo com a base inteira de alunos.
+  uint32_t durValidacaoMs = (micros() - inicioBuscaUs) / 1000;
   nfcUltimaDuracaoMs = durValidacaoMs;
 
   uint8_t res = (!encontrado) ? 1 : (ativo ? 0 : 2); // 0=Liberado, 1=Nao cadastrado, 2=Bloqueado
 
-  Serial.println("\n====================================");
-  Serial.printf("Cartao Detectado: %s\n", uidFormatado.c_str());
-  if (encontrado) Serial.printf("Titular: %s\n", nome.c_str());
-
-  String tempoValidacao = " | validacao " + String(durValidacaoMs) + " ms";
-  if (res == 0) {
-    logSerial("ACESSO LIBERADO: " + nome + " [" + uidFormatado + "]" + tempoValidacao, "ok");
-    acionarLedFeedback(0, 255, 0, 1800); // LED Verde vibrante
-    acionarSaidaFechadura();
-  } else if (res == 2) {
-    logSerial("ACESSO NEGADO (Bloqueado): " + nome + " [" + uidFormatado + "]" + tempoValidacao, "err");
-    acionarLedFeedback(255, 0, 0, 1800); // LED Vermelho
-  } else {
-    logSerial("ACESSO NEGADO (Nao Cadastrado): [" + uidFormatado + "]" + tempoValidacao, "wa");
-    acionarLedFeedback(255, 0, 0, 1800); // LED Vermelho
-  }
-  Serial.println("====================================");
-
+  // Só o histórico precisa da trava de dados; libera antes de montar Strings.
   registrarAcessoNoHistorico(uidFormatado, nome, res);
 
   xSemaphoreGive(travaDados);
+
+  String tempoValidacao = " | validacao " + String(durValidacaoMs) + " ms";
+  String msgLog;
+  const char* nivelLog = "wa";
+  if (res == 0) {
+    msgLog = "ACESSO LIBERADO: " + nome + " [" + uidFormatado + "]" + tempoValidacao;
+    nivelLog = "ok";
+    acionarLedFeedback(0, 255, 0, 1800); // LED Verde vibrante
+    acionarSaidaFechadura();
+  } else if (res == 2) {
+    msgLog = "ACESSO NEGADO (Bloqueado): " + nome + " [" + uidFormatado + "]" + tempoValidacao;
+    nivelLog = "err";
+    acionarLedFeedback(255, 0, 0, 1800); // LED Vermelho
+  } else {
+    msgLog = "ACESSO NEGADO (Nao Cadastrado): [" + uidFormatado + "]" + tempoValidacao;
+    acionarLedFeedback(255, 0, 0, 1800); // LED Vermelho
+  }
+
+  // Log fora da trava de dados: não acopla a ordem travaDados -> travaLog
+  // (evita inversão futura) e encurta o tempo com o mutex ocupado.
+  Serial.println("\n====================================");
+  Serial.printf("Cartao Detectado: %s\n", uidFormatado.c_str());
+  if (encontrado) Serial.printf("Titular: %s\n", nome.c_str());
+  Serial.println("====================================");
+
+  logSerial(msgLog, nivelLog);
 
   uint32_t durMs = (micros() - inicioUs) / 1000;
   if (durMs > diagNfcMaxMs) diagNfcMaxMs = durMs;
