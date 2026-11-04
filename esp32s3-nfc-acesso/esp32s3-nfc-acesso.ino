@@ -161,6 +161,11 @@ String   wifiIpNovo      = "";
 String   scanCacheJson   = "[]";
 uint32_t scanCacheMs     = 0;
 bool     scanCacheValido = false;
+// Varredura assíncrona: a página consulta /api/wifi/scan até scanning=false.
+// Só é permitida no modo AP (em STA a rede já está escolhida e trocar exige
+// "Esquecer rede"), então o servidor web nunca fica 2,8 s bloqueado.
+bool     wifiScanEmAndamento = false;
+uint32_t wifiScanInicioMs = 0;
 
 // Ponteiro universal para o sistema de arquivos (LittleFS ou FFat)
 fs::FS* fsPtr = nullptr;
@@ -215,6 +220,8 @@ volatile uint32_t diagEngasgos = 0;
 volatile uint32_t diagUltimoLoopMs = 0;
 volatile uint32_t diagUltimoLogMs = 0;
 volatile uint32_t diagNfcStackMin = 0;
+// Tempo da última validação de cartão (leitura do PN532 + consulta em RAM).
+volatile uint32_t nfcUltimaDuracaoMs = 0;
 uint32_t diagUltimoHeartbeatMs = 0;
 
 // Informações do último cartão lido
@@ -808,8 +815,10 @@ void inicializarArquivosDados() {
   // listagem do histórico não tocam mais na flash.
   reconstruirIndiceCartoes();
   carregarHistoricoRam();
-  Serial.printf("[RAM] Indice de cartoes: %u | historico: %u evento(s)\n",
-                (unsigned)cartoesRamTotal, (unsigned)historicoRamTotal);
+  String resumoRam = "[RAM] Indice de cartoes: " + String(cartoesRamTotal) +
+                     " | historico: " + String(historicoRamTotal) + " evento(s)";
+  Serial.println(resumoRam);
+  logSerial(resumoRam, "info"); // aparece também no console web (/console)
 }
 
 void registrarAcessoNoHistorico(String uid, String nome, uint8_t res) {
@@ -938,21 +947,27 @@ void processarLeituraNfc(String uidFormatado) {
   ultimoNomeLido = nome;
   xSemaphoreGive(travaUltimo);
 
+  // Tempo só da validação (busca em RAM), antes do log/histórico. Com o cache
+  // ativo fica em 0-1 ms mesmo com a base inteira de alunos.
+  uint32_t durValidacaoMs = (micros() - inicioUs) / 1000;
+  nfcUltimaDuracaoMs = durValidacaoMs;
+
   uint8_t res = (!encontrado) ? 1 : (ativo ? 0 : 2); // 0=Liberado, 1=Nao cadastrado, 2=Bloqueado
 
   Serial.println("\n====================================");
   Serial.printf("Cartao Detectado: %s\n", uidFormatado.c_str());
   if (encontrado) Serial.printf("Titular: %s\n", nome.c_str());
 
+  String tempoValidacao = " | validacao " + String(durValidacaoMs) + " ms";
   if (res == 0) {
-    logSerial("ACESSO LIBERADO: " + nome + " [" + uidFormatado + "]", "ok");
+    logSerial("ACESSO LIBERADO: " + nome + " [" + uidFormatado + "]" + tempoValidacao, "ok");
     acionarLedFeedback(0, 255, 0, 1800); // LED Verde vibrante
     acionarSaidaFechadura();
   } else if (res == 2) {
-    logSerial("ACESSO NEGADO (Bloqueado): " + nome + " [" + uidFormatado + "]", "err");
+    logSerial("ACESSO NEGADO (Bloqueado): " + nome + " [" + uidFormatado + "]" + tempoValidacao, "err");
     acionarLedFeedback(255, 0, 0, 1800); // LED Vermelho
   } else {
-    logSerial("ACESSO NEGADO (Nao Cadastrado): [" + uidFormatado + "]", "wa");
+    logSerial("ACESSO NEGADO (Nao Cadastrado): [" + uidFormatado + "]" + tempoValidacao, "wa");
     acionarLedFeedback(255, 0, 0, 1800); // LED Vermelho
   }
   Serial.println("====================================");
@@ -1547,6 +1562,12 @@ void rotaStatusSistema() {
   doc["loop_max_ms"] = diagLoopMaxMs;
   doc["http_max_ms"] = diagHttpMaxMs;
   doc["nfc_max_ms"] = diagNfcMaxMs;
+  doc["nfc_ultimo_ms"] = nfcUltimaDuracaoMs;
+  doc["cartoes_ram"] = cartoesRamTotal;
+  doc["historico_ram"] = historicoRamTotal;
+  doc["historico_pendente"] = historicoSujo;
+  doc["ram_cache_bytes"] = (uint32_t)(cartoesRamCapacidade * sizeof(CartaoRam) +
+                                      (historicoRam ? MAX_HISTORICO_LOG * sizeof(HistoricoRam) : 0));
   doc["fs_max_ms"] = diagFsMaxMs;
   doc["engasgos"] = diagEngasgos;
   doc["uptime"] = millis() / 1000;
@@ -1832,26 +1853,73 @@ void rotaEstadoWifi() {
 void rotaScanWifi() {
   if (!autenticarWifi()) return;
 
+  // Em STA a rede já está escolhida e a troca exige "Esquecer rede" (modo AP).
+  // Varrer aqui só bloqueava o servidor por ~2,8 s sem utilidade.
+  if (!modoAP) {
+    responderJson(200, "{\"ok\":true,\"scanning\":false,\"redes\":[],\"motivo\":\"conectado\"}");
+    return;
+  }
+
   bool forcar = server.hasArg("forcar") && server.arg("forcar") != "0";
   uint32_t agora = millis();
-  bool cacheOk = scanCacheValido && !forcar && (agora - scanCacheMs) < SCAN_CACHE_MS;
 
+  // Já existe uma varredura em andamento: responde na hora e o loop coleta.
+  if (wifiScanEmAndamento) {
+    if (agora - wifiScanInicioMs > 20000) { // trava de segurança do rádio
+      wifiScanEmAndamento = false;
+      WiFi.scanDelete();
+    } else {
+      responderJson(200, "{\"ok\":true,\"scanning\":true,\"redes\":[]}");
+      return;
+    }
+  }
+
+  bool cacheOk = scanCacheValido && !forcar && (agora - scanCacheMs) < SCAN_CACHE_MS;
   if (!cacheOk) {
-    int16_t total = WiFi.scanNetworks(false, true, false, 120);
-    if (total < 0) {
+    int16_t inicio = WiFi.scanNetworks(true, true, false, 120); // true = assíncrono
+    if (inicio == WIFI_SCAN_RUNNING) {
+      wifiScanEmAndamento = true;
+      wifiScanInicioMs = agora;
+      responderJson(200, "{\"ok\":true,\"scanning\":true,\"redes\":[]}");
+      return;
+    }
+    if (inicio < 0) {
       scanCacheValido = false;
       logSerial("[WIFI] Varredura de redes falhou.", "err");
       return responderErro(502, "Nao foi possivel escanear as redes agora. Tente novamente.");
     }
-    scanCacheJson = montarRedesJson(total);
+    // Terminou de imediato (raro): monta o cache direto.
+    scanCacheJson = montarRedesJson(inicio);
     scanCacheMs = millis();
     scanCacheValido = true;
     WiFi.scanDelete();
-    Serial.printf("[WEB] Varredura Wi-Fi: %d rede(s) encontrada(s).\n", total);
+    logSerial("[WEB] Varredura Wi-Fi: " + String(inicio) + " rede(s) encontrada(s).", "info");
   }
 
   String s = "{\"ok\":true,\"scanning\":false,\"ts\":" + String(scanCacheMs) + ",\"redes\":" + scanCacheJson + "}";
   responderJson(200, s);
+}
+
+// Chamado no loop (Core 1): coleta a varredura assíncrona quando o rádio termina.
+void processarScanWifi() {
+  if (!wifiScanEmAndamento) return;
+
+  int16_t total = WiFi.scanComplete();
+  if (total == WIFI_SCAN_RUNNING) return;
+
+  wifiScanEmAndamento = false;
+  if (total < 0) {
+    scanCacheValido = false;
+    WiFi.scanDelete();
+    logSerial("[WIFI] Varredura de redes falhou.", "err");
+    return;
+  }
+
+  scanCacheJson = montarRedesJson(total);
+  scanCacheMs = millis();
+  scanCacheValido = true;
+  WiFi.scanDelete();
+  logSerial("[WEB] Varredura Wi-Fi: " + String(total) + " rede(s) encontrada(s).", "info");
 }
 
 void finalizarTentativaWifi(wl_status_t situacao) {
@@ -2586,6 +2654,7 @@ void loop() {
 
   dnsServer.processNextRequest(); // portal cativo (sem efeito fora do modo AP)
   processarTentativaWifi();
+  processarScanWifi();           // coleta a varredura de Wi-Fi assíncrona
   atualizarSaidaFechadura();
   atualizarLedStatus();
   gravarHistoricoSePreciso(); // grava o histórico em lote (no máximo a cada 1,5 s)

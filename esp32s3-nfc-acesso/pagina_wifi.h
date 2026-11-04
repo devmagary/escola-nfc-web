@@ -110,7 +110,7 @@ input:focus{outline:2px solid var(--pri);border-color:transparent}
     <div class="topo">
       <h2>📶 Redes disponíveis</h2>
       <div class="acoes">
-        <label class="auto"><input type="checkbox" id="auto" checked> Atualizar sozinho</label>
+        <label class="auto"><input type="checkbox" id="auto"> Atualizar sozinho</label>
         <button class="sec sm" id="btnScan" type="button" onclick="escanear(true)">🔄 Atualizar</button>
       </div>
     </div>
@@ -162,6 +162,7 @@ const $ = id => document.getElementById(id);
 let estadoAtual = null;
 let timerEstado = null, timerScan = null, timerProgresso = null;
 let scanando = false;
+let varreduraInicialFeita = false;
 let progressoInicio = 0, ssidTentando = '', sucessoMostrado = false;
 
 function toast(msg, tipo) {
@@ -252,12 +253,24 @@ function selecionarRede(botao, ssid) {
 
 async function escanear(forcar) {
   if (scanando) return;
+  // Em STA a rede já está escolhida e a troca exige "Esquecer rede".
+  if (!estadoAtual || estadoAtual.modo !== 'AP') {
+    $('scanMsg').textContent = 'Placa conectada. Para trocar de rede, use “Esquecer rede” e configure no modo AP.';
+    return;
+  }
+
   scanando = true;
   $('btnScan').disabled = true;
   $('scanMsg').textContent = 'Procurando redes 2,4 GHz...';
   try {
-    const r = await api('GET', '/api/wifi/scan' + (forcar ? '?forcar=1' : ''));
-    renderRedes(r.redes || []);
+    let r = await api('GET', '/api/wifi/scan' + (forcar ? '?forcar=1' : ''));
+    const inicio = Date.now();
+    // A varredura é assíncrona na placa: consulta até o rádio terminar.
+    while (r && r.scanning && Date.now() - inicio < 20000) {
+      await new Promise(res => setTimeout(res, 600));
+      r = await api('GET', '/api/wifi/scan');
+    }
+    renderRedes(r && r.redes ? r.redes : []);
   } catch (e) {
     $('scanMsg').textContent = msgErro(e);
   }
@@ -267,10 +280,10 @@ async function escanear(forcar) {
 
 function cicloScan() {
   clearTimeout(timerScan);
-  const conectado = estadoAtual && estadoAtual.modo === 'STA';
+  const emAP = estadoAtual && estadoAtual.modo === 'AP';
   const ocupado = scanando || sucessoMostrado || (estadoAtual && estadoAtual.tentativa && estadoAtual.tentativa.ativa);
-  if ($('auto').checked && !document.hidden && !conectado && !ocupado) escanear(false);
-  timerScan = setTimeout(cicloScan, 5000);
+  if ($('auto').checked && emAP && !document.hidden && !ocupado) escanear(false);
+  timerScan = setTimeout(cicloScan, 15000);
 }
 
 // ---------------- ESTADO / TENTATIVA ----------------
@@ -280,6 +293,11 @@ async function atualizarEstado() {
     const e = await api('GET', '/api/wifi/estado');
     estadoAtual = e;
     renderEstado();
+    // Primeira varredura só depois de saber o modo (e só no AP).
+    if (!varreduraInicialFeita && e.modo === 'AP') {
+      varreduraInicialFeita = true;
+      escanear(false);
+    }
     const t = e.tentativa || {};
     if (t.ativa) {
       sucessoMostrado = false;
@@ -433,7 +451,6 @@ async function esquecer() {
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
     atualizarEstado();
-    escanear(false);
   }
 });
 
@@ -442,7 +459,6 @@ $('auto').addEventListener('change', () => {
 });
 
 atualizarEstado();
-escanear(false);
 cicloScan();
 </script>
 </body>
