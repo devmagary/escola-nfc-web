@@ -17,6 +17,8 @@ build/
 # Variáveis de ambiente e chaves locais (mantém apenas o modelo)
 .env*
 !.env.example
+# Modelo do laboratório offline (as chaves reais ficam só no .env.local)
+!.env.lab.example
 
 # Vercel CLI (projeto/org locais)
 .vercel/
