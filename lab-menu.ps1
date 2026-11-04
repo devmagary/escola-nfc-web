@@ -79,6 +79,65 @@ function Pegar-IP {
 function Escrever-Positivo { param([string]$Texto) Write-Host ("  [OK]  " + $Texto) -ForegroundColor Green }
 function Escrever-Negativo { param([string]$Texto) Write-Host ("  [XX]  " + $Texto) -ForegroundColor Red }
 
+# --- Estado ao vivo em processo de fundo -------------------------------------
+# As luzes ficam em UM job separado, escrevendo um JSON no %TEMP%: assim o
+# teclado nunca espera rede e a TUI responde na hora (o bug das setas engolidas
+# era o laço principal preso nos testes de rede).
+$script:CaminhoEstado = Join-Path $env:TEMP ("lab-nfc-estado-{0}.json" -f $PID)
+$script:JobEstado = $null
+$script:Estado = $null
+
+function Iniciar-Estado {
+  $projeto = $script:Projeto
+  $caminho = $script:CaminhoEstado
+  $pidPai = $PID
+  $script:JobEstado = Start-Job -ScriptBlock {
+    param($projeto, $caminho, $pidPai)
+    try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+    Set-Location $projeto
+    while ($true) {
+      if (-not (Get-Process -Id $pidPai -ErrorAction SilentlyContinue)) { break }
+      $docker = $false
+      & cmd /c "docker info >nul 2>nul"
+      $docker = ($LASTEXITCODE -eq 0)
+      $banco = $false
+      try { $r = Invoke-WebRequest 'http://localhost:54321/auth/v1/health' -TimeoutSec 3 -UseBasicParsing; $banco = ($r.StatusCode -eq 200) } catch { }
+      $painel = $false
+      try { $r = Invoke-WebRequest 'http://localhost:5500/' -Method Head -TimeoutSec 3 -UseBasicParsing; $painel = ($r.StatusCode -eq 200) } catch { }
+      $placa = 0
+      $urlPlaca = 'http://192.168.0.73'
+      try {
+        $linha = Get-Content (Join-Path $projeto '.env.local') -ErrorAction SilentlyContinue |
+          Where-Object { $_ -match '^ESP_URL\s*=' } | Select-Object -First 1
+        if ($linha) { $urlPlaca = (($linha -split '=', 2)[1]).Trim() }
+      } catch { }
+      try {
+        $r = Invoke-WebRequest ($urlPlaca.TrimEnd('/') + '/api/ultimo') -TimeoutSec 3 -UseBasicParsing
+        if ($r.Content -match '"nfc_ok"\s*:\s*true') { $placa = 2 } else { $placa = 1 }
+      } catch { $placa = 0 }
+      @{ docker = $docker; banco = $banco; painel = $painel; placa = $placa; em = (Get-Date).ToString('o') } |
+        ConvertTo-Json -Compress | Set-Content -Path $caminho -Encoding UTF8 -Force
+      Start-Sleep -Seconds 2
+    }
+  } -ArgumentList $projeto, $caminho, $pidPai
+}
+
+function Parar-Estado {
+  if ($script:JobEstado) {
+    try { Stop-Job $script:JobEstado -ErrorAction SilentlyContinue | Out-Null } catch { }
+    try { Remove-Job $script:JobEstado -Force -ErrorAction SilentlyContinue | Out-Null } catch { }
+    $script:JobEstado = $null
+  }
+  Remove-Item $script:CaminhoEstado -ErrorAction SilentlyContinue
+}
+
+function Ler-Estado {
+  try {
+    $json = Get-Content $script:CaminhoEstado -ErrorAction Stop -Encoding UTF8
+    return ($json | ConvertFrom-Json)
+  } catch { return $null }
+}
+
 function Esperar-Docker {
   if (Testar-Docker) { Escrever-Positivo 'Docker Desktop já está ligado.'; return $true }
   $caminhoDocker = 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
@@ -275,14 +334,21 @@ function Desenhar-Quadro {
 }
 
 function Desenhar-Luzes {
+  $estado = Ler-Estado
   $luzes = @()
-  if (Testar-Docker)   { $luzes += , @('Docker: ligado',       'Green') } else { $luzes += , @('Docker: parado', 'Red') }
-  if (Testar-Supabase) { $luzes += , @('Banco: ligado',        'Green') } else { $luzes += , @('Banco: parado',  'Red') }
-  if (Testar-Painel)   { $luzes += , @('Painel: ligado',       'Green') } else { $luzes += , @('Painel: parado', 'Red') }
-  $placa = Testar-Placa
-  if ($placa -eq 2)      { $luzes += , @('Placa: pronta',      'Green') }
-  elseif ($placa -eq 1)  { $luzes += , @('Placa: leitor fora', 'Yellow') }
-  else                   { $luzes += , @('Placa: ausente',     'Red') }
+  if ($null -eq $estado) {
+    $luzes += , @('Docker: ...',       'DarkGray')
+    $luzes += , @('Banco: ...',        'DarkGray')
+    $luzes += , @('Painel: ...',       'DarkGray')
+    $luzes += , @('Placa: ...',        'DarkGray')
+  } else {
+    if ($estado.docker) { $luzes += , @('Docker: ligado',       'Green') } else { $luzes += , @('Docker: parado', 'Red') }
+    if ($estado.banco)  { $luzes += , @('Banco: ligado',        'Green') } else { $luzes += , @('Banco: parado',  'Red') }
+    if ($estado.painel) { $luzes += , @('Painel: ligado',       'Green') } else { $luzes += , @('Painel: parado', 'Red') }
+    if ($estado.placa -eq 2)      { $luzes += , @('Placa: pronta',      'Green') }
+    elseif ($estado.placa -eq 1)  { $luzes += , @('Placa: leitor fora', 'Yellow') }
+    else                          { $luzes += , @('Placa: ausente',     'Red') }
+  }
   try { [Console]::SetCursorPosition(4, $script:LinhaLuzes) } catch { }
   foreach ($luz in $luzes) {
     Write-Host ($luz[0].PadRight(22)) -NoNewline -ForegroundColor $luz[1]
@@ -336,7 +402,7 @@ function Ler-Opcao {
 
 function Rodar-TUI {
   $selecionado = 0
-  $selecionadoQuadro = 0
+  try { Iniciar-Estado } catch { }
   Desenhar-Quadro
   for ($i = 0; $i -lt $script:Opcoes.Count; $i++) { Desenhar-MenuItem -Indice $i -Selecionado ($i -eq $selecionado) }
   Mensagem 'Bem-vindo! A luz verde é o que está no ar. Use as setas + Enter.'
@@ -351,7 +417,12 @@ function Rodar-TUI {
       }
       if ($resposta.Escolheu) {
         $escolhido = $script:Opcoes[$selecionado].Valor
-        if ($escolhido -eq 'sair') { Clear-Host; try { [Console]::CursorVisible = $true } catch { }; return }
+        if ($escolhido -eq 'sair') {
+          Parar-Estado
+          Clear-Host
+          try { [Console]::CursorVisible = $true } catch { }
+          return
+        }
         try { [Console]::CursorVisible = $true } catch { }
         Clear-Host
         switch ($escolhido) {
@@ -371,7 +442,7 @@ function Rodar-TUI {
         $selecionado = 0
       }
     } else {
-      Start-Sleep -Milliseconds 500
+      Start-Sleep -Milliseconds 250
       $script:Relogio = $script:Relogio + 1
       if ($script:Relogio % 4 -eq 0) { Desenhar-Luzes }
     }
@@ -405,4 +476,5 @@ try {
   if (-not $SemPausa) { $null = Read-Host 'Aperte Enter para fechar esta janela' }
 } finally {
   try { [Console]::CursorVisible = $true } catch { }
+  try { Parar-Estado } catch { }
 }
