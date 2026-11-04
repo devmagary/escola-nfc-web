@@ -9,12 +9,12 @@ Este guia foi elaborado para explicar detalhadamente como o sistema foi constru�
 Pense neste projeto como uma **fechadura digital inteligente e autônoma**, projetada para portarias escolares e corporativas.
 
 Ele une **dupla camada de segurança**:
-1. **Operação 100% Offline (Local):** Mesmo se a internet da escola cair, o ESP32 continua liberando ou bloqueando alunos em **0 milissegundos**, consultando sua memória Flash interna (`cartoes.json`).
+1. **Operação 100% Offline (Local):** Mesmo se a internet da escola cair, o ESP32 continua liberando ou bloqueando alunos em **0 milissegundos**, consultando o índice de cartões em **RAM (PSRAM)**, espelhado de `cartoes.json` na Flash interna.
 2. **Sincronização com a Nuvem (Supabase):** Quando conectado ao Wi-Fi, o ESP32 recebe atualizações em tempo real enviadas pela Secretaria ou Direção através da plataforma web.
 
 ### Arquitetura de Dois Núcleos (FreeRTOS Dual-Core):
-* **Núcleo 0 (Core 0):** Cuida exclusivamente da leitura contínua das tags NFC (PN532 a 13.56 MHz) e da verificação ativa da saúde do leitor via I2C a cada 2.5s.
-* **Núcleo 1 (Core 1):** Mantém no ar o Servidor Web completo, a API REST com suporte a CORS, o Console Serial Web e o atualizador OTA sem fio.
+* **Núcleo 0 (Core 0):** Cuida exclusivamente da leitura contínua das tags NFC (PN532 a 13.56 MHz), da verificação de saúde do leitor via I2C a cada **5 s** (com histerese de 3 falhas) e dos diagnósticos de I2C pedidos pelo console. A tarefa sobe **antes** do Wi-Fi, então o leitor já funciona enquanto a placa ainda tenta entrar na rede (até 20 s).
+* **Núcleo 1 (Core 1):** Mantém no ar o Servidor Web completo, a API REST com suporte a CORS, o Console Serial Web e o atualizador OTA sem fio; também descarrega o histórico em lote (a cada ~1,5 s).
 * **Resultado:** Você pode monitorar pelo celular ou enviar um novo firmware e, no mesmo milissegundo, encostar um cartão: **o sistema não trava nem engasga**.
 
 ### 1.1. O que o rádio do ESP32-S3 realmente suporta (Wi-Fi 5 x Wi-Fi 4)
@@ -86,7 +86,7 @@ O LED RGB soldado na placa (no **GPIO 48**) fornece diagnóstico visual imediato
 | 🌊 **Ciano Suave** | Efeito respiração (*breathing*) contínuo | **Standby Normal:** Wi-Fi conectado e leitor PN532 online, pronto para leitura. |
 | 🟢 **Verde Brilhante** | Aceso fixo por 2 segundos | **Acesso Liberado! (Exclusivo):** Aluno/usuário cadastrado e ativo. Fechadura acionada. |
 | 🔴 **Vermelho Vivo** | Aceso fixo por 2 segundos | **Acesso Negado:** Cartão não cadastrado ou aluno bloqueado pela direção. |
-| 🚨 **Vermelho Piscando** | Pisca rápido repetidamente | **Falha de Hardware PN532:** Módulo solto, desconectado ou sem resposta no I2C (pinos 8/9). |
+| 🟠 **Laranja/Âmbar Piscando** | Pisca rápido repetidamente (`220,45,0`) | **Falha de Hardware PN532:** módulo solto, desconectado ou sem resposta no I2C (pinos 8/9). Só acende após **3 falhas seguidas** do heartbeat — uma falha isolada não pisca o LED. |
 | 🟣 **Roxo Suave** | Aceso fixo | **Modo Ponto de Acesso (AP):** Wi-Fi não encontrado; rede própria `ControleAcesso-S3` ativa. |
 | 🔷 **Azul Piscando** | Pisca a cada ~0,7 s | **Conectando:** A placa está tentando entrar na rede escolhida na página `/wifi`. |
 | 🔵 **Azul Suave** | Aceso fixo durante o boot | **Inicializando:** Conectando ao Wi-Fi e montando sistema de arquivos Flash. |
@@ -142,15 +142,31 @@ Uma vez gravado o código na placa, você **não precisa mais do cabo USB**. Tod
 * **Endereço:** `http://<ip-do-esp>/console` *(ex: `http://192.168.0.73/console` ou `http://nfc.local/console`)*
 * **Recursos do Console:**
   * Terminal com auto-scroll e cores para cada evento.
-  * **📡 Botão "Testar PN532":** Executa ping I2C e exibe versão do firmware do leitor.
+  * **📡 Botão "Testar PN532":** Executa o ping na tarefa do **Core 0** (a mesma que lê os cartões) e exibe a versão do firmware do leitor; se o ping falhar, faz uma **varredura I2C** e informa o que encontrou no barramento (veja a seção 5.1.1).
   * **📊 Botão "Diagnóstico":** Exibe IP, sinal RSSI, Uptime e memória RAM livre (Heap interna e PSRAM).
   * **🔄 Botão "Reiniciar ESP32":** Reinicialização remota com 1 toque.
   * **⏸️ Pausar Rolagem / Limpar Tela:** Para inspecionar mensagens pausadas.
   * **Teste do LED:** o console tem os botões **🟢 Testar LED verde** e **🔴 LED vermelho**; eles acendem a cor por 5 s e ajudam a isolar problemas de hardware.
 
-### 5.1.1. Diagnóstico de engasgos (`/api/diagnostico`)
+### 5.1.1. Botão “Testar PN532”: como interpretar a varredura I2C
 
-A versão **2.0.0-diag** adiciona instrumentação sem alterar as funções:
+O comando `ping_nfc` do console roda na tarefa do **Core 0** — o barramento I2C tem um único dono, e o Core 1 apenas enfileira o pedido e lê a resposta. Se o PN532 não responder ao ping, o firmware varre os endereços `0x08`–`0x77` e responde com um dos três resultados:
+
+| Resposta do console | O que significa | O que verificar |
+| :--- | :--- | :--- |
+| `Varredura: NENHUM dispositivo no barramento` | Nada responde no I2C: fios, alimentação ou chaves seletoras. | Chaves **1=ON / 2=OFF**; fios **SDA→GPIO 8** e **SCL→GPIO 9** (não invertidos); **VCC em 3V3** e GND comum. |
+| `Varredura: dispositivo em 0x24` | O módulo responde no endereço correto do PN532 em I2C, mas não devolveu a versão de firmware. | O firmware tenta reinicializar até 3 vezes. Se insistir, confira as chaves (**1=ON / 2=OFF**, modo I2C e não HSU) e os contatos dos fios. |
+| `Varredura: dispositivo estranho em 0x..` | Existe algo no barramento, mas fora de `0x24`. | Conflito de endereço com outro periférico I2C; o esperado para o PN532 é `0x24`. |
+
+Se a varredura encontrar `0x24` e o módulo voltar a responder, a resposta é **`PN532 recuperado! Firmware x.y`** — era uma falha momentânea do I2C, sem ação necessária.
+
+Recomendações fixas de montagem: **VCC em 3V3** (não 5 V), chaves **1=ON e 2=OFF**, **SDA=GPIO 8** e **SCL=GPIO 9** (detalhes nas seções 2.2 e 2.3).
+
+---
+
+### 5.1.2. Diagnóstico de engasgos (`/api/diagnostico`)
+
+A instrumentação entrou na **2.0.0-diag** e continua na versão atual (**2.1.0-diag**), sem alterar as funções:
 
 * mede o **gap entre iterações do loop**, tempo de `server.handleClient()`, processamento de cartão e operações de Flash;
 * registra no console eventos acima dos limiares: loop > 50 ms, HTTP > 80 ms, NFC > 50 ms, FS > 25 ms;
@@ -199,6 +215,19 @@ Se a placa não encontrar a rede salva (escola mudou a senha, roteador novo, pri
 
 ---
 
+### 5.4. Cache de cartões e histórico na PSRAM (2.1.0)
+
+Na versão **2.1.0-diag**, validar o cartão e consultar o histórico deixaram de tocar a Flash a cada acesso:
+
+* **Índice de cartões em RAM:** `cartoes.json` é lido uma vez no boot e mantido em PSRAM/heap; cada aproximação vira uma busca em memória. O índice é reconstruído em toda rota que grava a base (cadastro, edição, exclusão, sincronização e restauração de backup).
+* **Histórico em lista circular de 50 eventos na RAM:** `GET /api/log` responde da memória, sem os ~39 ms de leitura da Flash por poll do painel.
+* **Gravação em lote:** o histórico é gravado na Flash no máximo a cada **~1,5 s** e é descarregado antes de reiniciar (comando, OTA e troca de Wi-Fi).
+* **Fallback:** se faltar PSRAM/heap, o firmware volta ao comportamento antigo (lê e grava direto na Flash).
+
+Efeito prático: resposta mais rápida na portaria, menos desgaste da Flash e menos tempo com a trava de dados ocupada. Em **queda de energia**, os últimos ~1,5 s de histórico podem não ter sido gravados; em reinício normal nada se perde.
+
+---
+
 ## 6. Sincronização Híbrida com a Plataforma Escolar
 
 O ESP32 trabalha de forma integrada com a aplicação web escolar ([escola-nfc-web](file:///c:/Users/devma/.gemini/antigravity/scratch/sigeduc-auto/escola-nfc-web)):
@@ -206,14 +235,15 @@ O ESP32 trabalha de forma integrada com a aplicação web escolar ([escola-nfc-w
 ### Rotas de Sincronização da API REST:
 * `POST /api/sincronizar_aluno`:
   * Envia `{ "uid": "2C:9D:7E:8E", "nome": "Lucas Silva", "ativo": false }`.
-  * Atualiza o status do aluno na Flash imediatamente. O LED já responderá vermelho no próximo toque.
+  * Grava na Flash e atualiza o índice em RAM imediatamente. O LED já responderá vermelho no próximo toque.
 * `POST /api/sincronizar_todos`:
   * Envia um array JSON com todos os alunos cadastrados no Supabase.
-  * Grava a base inteira em lote na Flash com persistência permanente.
+  * Grava a base inteira em lote na Flash com persistência permanente e reconstrói o índice em RAM.
 * `POST /api/remover_aluno`:
   * Remove o UID da lista interna quando o aluno é excluído do sistema.
 * `GET /api/ultimo`:
   * Fornece à tela da Portaria o último cartão lido com contador de sequência (`seq`) para disparo instantâneo da ficha do aluno.
+* `GET /api/log`: últimos **50** acessos, servidos do cache em RAM (sem leitura de Flash). Exige o login Basic do painel. `DELETE /api/log` limpa o histórico.
 
 ### Rotas do Painel Web (LittleFS):
 * `GET /painel/`: serve o painel web completo (HTML/CSS/JS) na mesma origem da API. É público (o login é feito no Supabase dentro do painel).
