@@ -234,6 +234,8 @@ Manual completo de implantação: **[COMO_CONFIGURAR_E_PUBLICAR.md](COMO_CONFIGU
 
 ## 📚 Documentação
 
+* **[docs/MODO_OFFLINE_LAB.md](docs/MODO_OFFLINE_LAB.md)** — laboratório offline: Supabase local em Docker + painel no notebook + ESP32 real. Runbook técnico.
+* **[docs/docker-para-leigos/](docs/docker-para-leigos/)** — tutoriais sem jargão: o que é Docker, instalar o Docker Desktop, usar o laboratório no dia a dia, problemas comuns e glossário.
 * **[COMO_CONFIGURAR_E_PUBLICAR.md](COMO_CONFIGURAR_E_PUBLICAR.md)** — passo a passo do Supabase, `.env.local`, primeiro admin, Vercel, totem local, CSV, backup e solução de problemas.
 * **[docs/DECISAO_BACKEND.md](docs/DECISAO_BACKEND.md)** — por que o backend é o Supabase e como Firebase e PocketBase se comparam.
 * **[esp32s3-nfc-acesso/MANUAL_DO_SISTEMA.md](esp32s3-nfc-acesso/MANUAL_DO_SISTEMA.md)** — montagem, gravação, console e OTA do firmware.
