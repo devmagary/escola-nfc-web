@@ -21,7 +21,7 @@ import { spawn } from 'node:child_process';
 import os from 'node:os';
 import process from 'node:process';
 
-import { loadEnv } from './build-config.mjs';
+import { loadEnv, validarUrlHttp } from './build-config.mjs';
 
 const LINHA = '─'.repeat(64);
 
@@ -87,20 +87,27 @@ export async function verificarLaboratorio(args = {}) {
 
   // 2 ─ Variáveis do .env.local
   const env = await loadEnv({ cwd: process.cwd() });
-  const url = (env.values.SUPABASE_URL || '').replace(/\/+$/, '');
+  const urlCrua = (env.values.SUPABASE_URL || '').trim();
   const anon = env.values.SUPABASE_ANON_KEY || '';
   const service = env.values.SUPABASE_SERVICE_ROLE_KEY || '';
-  const apontaParaLocal = Boolean(url) && !/supabase\.co$/i.test(new URL(url, 'http://x.invalid').hostname);
+  // validarUrlHttp (de build-config) valida http/https + host e retorna erro em
+  // texto, sem lançar exceção — protecte o usuário leigo de uma URL malformada.
+  const verificada = urlCrua ? validarUrlHttp(urlCrua, 'SUPABASE_URL') : null;
+  const urlValida = Boolean(verificada?.value && !verificada.error);
+  const url = urlValida ? verificada.value.replace(/\/+$/, '') : '';
+  const apontaParaLocal = urlValida && !/supabase\.co$/i.test(new URL(url).hostname);
+  const mensagemConfig = !urlCrua || !anon
+    ? '.env.local sem SUPABASE_URL/SUPABASE_ANON_KEY.'
+    : !urlValida
+      ? (verificada.error || `SUPABASE_URL não é uma URL válida: "${urlCrua}".`)
+      : `SUPABASE_URL (${url}) não é local; o laboratório precisa de http://IP-DO-NOTEBOOK:54321.`;
   resultados.push({
     nome: 'Configuração (.env.local)',
-    ok: Boolean(url && anon && apontaParaLocal),
+    ok: Boolean(urlValida && anon && apontaParaLocal),
     comoResolver: 'Copie .env.lab.example para .env.local e preencha com os valores de: npm run lab:status',
   });
-  if (url && anon && apontaParaLocal) ok(`Configuração aponta para o Supabase local: ${url}`);
-  else {
-    falha(!url || !anon ? '.env.local sem SUPABASE_URL/SUPABASE_ANON_KEY.' : `SUPABASE_URL (${url}) não é local; o laboratório precisa de http://IP-DO-NOTEBOOK:54321.`);
-    dica(resultados.at(-1).comoResolver);
-  }
+  if (urlValida && anon && apontaParaLocal) ok(`Configuração aponta para o Supabase local: ${url}`);
+  else { falha(mensagemConfig); dica(resultados.at(-1).comoResolver); }
 
   if (!url || !anon) {
     return { ok: false, checks: resultados };
@@ -197,8 +204,13 @@ export async function verificarLaboratorio(args = {}) {
   info(LINHA);
   if (tudoOk) {
     ok('LABORATÓRIO PRONTO.');
-    for (const ip of listarIpsRede()) {
-      info(`   No tablet: painel http://${ip}:5500 · Studio http://${ip}:54323`);
+    const ips = listarIpsRede();
+    if (ips.length === 0) {
+      info('   Nenhum IP de rede local detectado — confira o Wi-Fi/cabo do notebook antes de usar o tablet.');
+    } else {
+      for (const ip of ips) {
+        info(`   No tablet: painel http://${ip}:5500 · Studio http://${ip}:54323`);
+      }
     }
   } else {
     falha('Há itens a resolver antes do uso (veja as dicas acima).');
