@@ -112,7 +112,7 @@ const char* ARQ_HISTORICO = "/historico.json";
 #define MAX_HISTORICO_LOG 50
 
 // Versão desta build de diagnóstico (aparece em /api/status e /api/diagnostico).
-#define FW_VERSAO "2.1.0-diag"
+#define FW_VERSAO "2.1.1-diag"
 
 // Limiares do diagnóstico de desempenho (ms). Eventos acima disso são
 // registrados no buffer circular e, com rate-limit, no console.

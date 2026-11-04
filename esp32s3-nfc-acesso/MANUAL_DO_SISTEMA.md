@@ -166,7 +166,7 @@ Recomendações fixas de montagem: **VCC em 3V3** (não 5 V), chaves **1=ON e 2=
 
 ### 5.1.2. Diagnóstico de engasgos (`/api/diagnostico`)
 
-A instrumentação entrou na **2.0.0-diag** e continua na versão atual (**2.1.0-diag**), sem alterar as funções:
+A instrumentação entrou na **2.0.0-diag** e continua na versão atual (**2.1.1-diag**), sem alterar as funções:
 
 * mede o **gap entre iterações do loop**, tempo de `server.handleClient()`, processamento de cartão e operações de Flash;
 * registra no console eventos acima dos limiares: loop > 50 ms, HTTP > 80 ms, NFC > 50 ms, FS > 25 ms;
@@ -176,7 +176,7 @@ A instrumentação entrou na **2.0.0-diag** e continua na versão atual (**2.1.0
   ```
 * mostra `heap_livre`, `heap_min`, PSRAM, `stack_loop`, `stack_nfc`, RSSI e contadores de engasgo;
 * o `/api/status` também devolve `versao`, `heap_livre`, `heap_min`, `loop_max_ms`, `http_max_ms`, `nfc_max_ms`, `nfc_ultimo_ms`, `fs_max_ms` e `engasgos`;
-* a partir da 2.1.0, mostra também o cache: `cartoes_ram` (cartões no índice em memória), `historico_ram` (eventos no histórico em RAM), `historico_pendente` (há eventos ainda não gravados na Flash) e `ram_cache_bytes`.
+* a partir da 2.1.0, mostra também o cache: `cartoes_ram` (cartões no índice em memória), `historico_ram` (eventos no histórico em RAM), `historico_pendente` (há eventos ainda não gravados na Flash), `ram_cache_bytes` e `nfc_ultimo_ms`;
 
 Use a página `/console` para ver os logs e o endpoint `/api/diagnostico` para os números. Um pico isolado em `HTTP` é normal ao carregar o painel; valores altos e repetidos em `LOOP` ou `FS` indicam o que precisa ser otimizado.
 
@@ -216,9 +216,9 @@ Se a placa não encontrar a rede salva (escola mudou a senha, roteador novo, pri
 
 ---
 
-### 5.4. Cache de cartões e histórico na PSRAM (2.1.0)
+### 5.4. Cache de cartões e histórico na PSRAM (2.1.x)
 
-Na versão **2.1.0-diag**, validar o cartão e consultar o histórico deixaram de tocar a Flash a cada acesso:
+Na versão **2.1.1-diag**, validar o cartão e consultar o histórico deixaram de tocar a Flash a cada acesso:
 
 * **Índice de cartões em RAM:** `cartoes.json` é lido uma vez no boot e mantido em PSRAM/heap; cada aproximação vira uma busca em memória. O índice é reconstruído em toda rota que grava a base (cadastro, edição, exclusão, sincronização e restauração de backup).
 * **Histórico em lista circular de 50 eventos na RAM:** `GET /api/log` responde da memória, sem os ~39 ms de leitura da Flash por poll do painel.
