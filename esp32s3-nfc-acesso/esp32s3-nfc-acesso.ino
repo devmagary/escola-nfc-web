@@ -1645,8 +1645,39 @@ void rotaComandoConsole() {
       resposta = "PN532 Ativo! Firmware " + String((v >> 16) & 0xFF) + "." + String((v >> 8) & 0xFF);
       logSerial(resposta, "ok");
     } else {
-      resposta = "FALHA: PN532 nao respondeu no I2C (Pinos 8 e 9)";
-      logSerial(resposta, "err");
+      // Varre o barramento I2C (pinos 8/9) para distinguir fio/alimentação de modo seletor
+      String achados = "";
+      for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) {
+          if (achados.length()) achados += ", ";
+          achados += "0x" + String(addr, HEX);
+        }
+      }
+      resposta = "FALHA: PN532 nao respondeu no I2C (Pinos 8 e 9).";
+      if (achados.length() == 0) {
+        resposta += " Varredura: NENHUM dispositivo no barramento. Verifique 1) chave 1=ON e 2=OFF no modulo; 2) fios SDA->GPIO8, SCL->GPIO9 (nao invertidos); 3) alimentacao VCC/GND (use 3V3).";
+        logSerial(resposta, "err");
+      } else if (achados.startsWith("0x24")) {
+        // O PN532 em modo I2C responde no endereco 0x24: barramento OK, modulo presente
+        bool recuperado = false;
+        for (uint8_t tentativas = 0; tentativas < 3 && !recuperado; tentativas++) {
+          delay(150);
+          if (iniciarPN532(false)) {
+            resposta = "PN532 recuperado! Firmware " + String(((nfc.getFirmwareVersion()) >> 16) & 0xFF) + "." + String((nfc.getFirmwareVersion() >> 8) & 0xFF) + " (detectado em 0x24, havia falha momentanea no I2C)";
+            recuperado = true;
+            nfcOk = true;
+            logSerial(resposta, "ok");
+          }
+        }
+        if (!recuperado) {
+          resposta += " Varredura: dispositivo em 0x24 (o modulo responde!) mas sem versao de firmware. Confira as chaves de novo: 1=ON e 2=OFF (modo I2C, nao HSU).";
+          logSerial(resposta, "err");
+        }
+      } else {
+        resposta += " Varredura: dispositivo estranho em " + achados + " (esperado 0x24).";
+        logSerial(resposta, "err");
+      }
     }
   } else if (cmd == "status") {
     resposta = "IP: " + (modoAP ? WiFi.softAPIP() : WiFi.localIP()).toString() +
