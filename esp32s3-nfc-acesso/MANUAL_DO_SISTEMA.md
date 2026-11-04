@@ -68,6 +68,8 @@ O módulo PN532 possui duas pequenas chavinhas brancas numeradas **1** e **2**. 
 
 > [!NOTE]
 > **4 fios bastam para ler cartões.** O RSTPD_N e a IRQ são opcionais. O `RSTO` da fileira frontal **não** é o reset do CI — não ligue o GPIO 5 nele. A diferença do RSTPD_N aparece só numa falha: com o fio, o firmware reinicia o PN532 sozinho; sem ele, é preciso desligar/religar a placa. A IRQ não é usada em I2C. *(O PN532 tem um travamento conhecido; o reset por hardware é o contorno recomendado.)*
+>
+> **Ligar o RSTPD_N não altera as chaves seletoras:** elas continuam **1=ON / 2=OFF** (modo I2C). O reset é independente do modo de interface. Ligue o fio com a placa desligada e não prenda o RSTPD_N em 3V3 fixo — ele precisa ir ao **GPIO 5** para o firmware poder puxá-lo para LOW.
 
 > [!WARNING]
 > **Pinos Protegidos no S3 N16R8:**
