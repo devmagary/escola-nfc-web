@@ -33,7 +33,7 @@ Este runbook é o procedimento operacional do laboratório **Acesso Escolar NFC*
 | Mailpit | `http://192.168.0.81:54324` | e-mails de autenticação |
 | ESP32 | `http://192.168.0.73` ou `http://nfc.local` | `/painel/` e `/api/*` |
 
-> O IP vem de DHCP e **pode mudar**. Rode `npm run lab:ip`. Se mudou, atualize `SUPABASE_URL`/`ESP_URL` no `.env.local` e reabra `npm run lab:dev` (ele regenera o `config.js` automaticamente).
+> O IP vem de DHCP e **pode mudar**. Rode `npm run lab:ip`. Se mudou, atualize `SUPABASE_URL`/`ESP_URL` no `.env.local` **e** `site_url`/`additional_redirect_urls` em `supabase/config.toml` (nada quebra o login, mas os redirects usados por e-mails ficam desalinhados), reabra `npm run lab:dev` — ele regenera o `config.js` — e, se quiser realinhar a pilha, `npm run lab:stop` + `lab:start`.
 
 ## Pré-requisitos
 
