@@ -4,7 +4,22 @@ Se o Docker Desktop e o projeto ainda não estão instalados, veja [02-instalar-
 
 > **Em leigo:** o laboratório é uma "escola de mentira" que roda dentro do notebook: um banco de dados e um painel. A placa ESP32 fica na mesma rede e conversa com os dois.
 
-## Abrindo o dia (3 janelas)
+## Jeito fácil: atalhos na área de trabalho
+
+Na pasta do projeto existe um montinho de atalhos de duplo clique:
+
+| Atalho | O que faz |
+|:---|:---|
+| `lab.cmd` | Abre o **menuzinho** com setas: ligar, desligar, checar, endereços e recomeçar. No topo dele há três luzes (`Docker`, `Banco`, `Painel`) mostrando o que está ligado |
+| `lab-ligar.cmd` | Faz sozinho: abre o Docker, espera ligar, sobe o banco e abre uma janela nova chamada **"Painel NFC"** que é o site (não feche essa janela enquanto estiver usando) |
+| `lab-desligar.cmd` | Fecha a janela do painel e guarda o banco. Nada é apagado |
+| `lab-checar.cmd` | O diagnóstico em português, item por item |
+
+Para copiar estes atalhos para a área de trabalho do Windows, dê **um** duplo clique em `lab-criar-atalhos.cmd`. Aparecerão quatro ícones "Servidor NFC - ..." na área de trabalho; a partir daí, você não precisa mais entrar na pasta.
+
+Se preferir continuar na mão, o jeito tradicional de janelas está abaixo.
+
+## Jeito manual: duas janelas de terminal
 
 1. Abra o **Docker Desktop** pelo menu Iniciar e espere a baleia parar de girar.
 

@@ -69,6 +69,8 @@ Consulta rápida. Cada palavra em uma linha, na primeira vez.
 | `npm run lab:admin` | Recria o primeiro administrador |
 | `npm run lab:backup` | Gera `supabase/backup.sql` |
 
+**Atalhos de duplo clique** (na pasta do projeto, ou na área de trabalho se você rodou `lab-criar-atalhos.cmd`): `lab.cmd` abre o menu com setas; `lab-ligar.cmd` liga tudo; `lab-desligar.cmd` desliga; `lab-checar.cmd` faz o diagnóstico.
+
 Todos rodam na pasta do projeto, com o Docker aberto.
 
 ## Parte 4 — Antes de esquecer
