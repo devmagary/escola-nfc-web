@@ -175,7 +175,8 @@ A instrumentação entrou na **2.0.0-diag** e continua na versão atual (**2.1.0
   http://<ip-do-esp>/api/diagnostico
   ```
 * mostra `heap_livre`, `heap_min`, PSRAM, `stack_loop`, `stack_nfc`, RSSI e contadores de engasgo;
-* o `/api/status` também passou a devolver `versao`, `heap_livre`, `heap_min`, `loop_max_ms`, `http_max_ms`, `nfc_max_ms`, `fs_max_ms` e `engasgos`.
+* o `/api/status` também devolve `versao`, `heap_livre`, `heap_min`, `loop_max_ms`, `http_max_ms`, `nfc_max_ms`, `nfc_ultimo_ms`, `fs_max_ms` e `engasgos`;
+* a partir da 2.1.0, mostra também o cache: `cartoes_ram` (cartões no índice em memória), `historico_ram` (eventos no histórico em RAM), `historico_pendente` (há eventos ainda não gravados na Flash) e `ram_cache_bytes`.
 
 Use a página `/console` para ver os logs e o endpoint `/api/diagnostico` para os números. Um pico isolado em `HTTP` é normal ao carregar o painel; valores altos e repetidos em `LOOP` ou `FS` indicam o que precisa ser otimizado.
 
@@ -200,7 +201,7 @@ Se a placa não encontrar a rede salva (escola mudou a senha, roteador novo, pri
 2. O **portal cativo** abre sozinho. Se não abrir, acesse `http://192.168.4.1/wifi` no navegador.
 3. Toque na rede desejada na lista (somente **2,4 GHz** aparecem — redes de 5 GHz não são visíveis para o ESP32).
 4. Digite a senha e toque em **“Conectar e salvar”**.
-   * A lista atualiza sozinha a cada 5 s; o botão **🔄 Atualizar** força uma nova varredura.
+   * A varredura só acontece no **modo AP** (em STA a rede já está escolhida e a troca exige “Esquecer rede”). Ela é **assíncrona**: a placa responde `scanning: true` e a página consulta até o rádio terminar, sem bloquear o servidor. O botão **🔄 Atualizar** força uma nova varredura; “Atualizar sozinho” vem desligado.
    * O LED fica **azul piscando** enquanto a tentativa está em andamento (até 20 s).
    * Senha errada: a página mostra o motivo e a placa **continua no modo AP**, sem reiniciar.
    * Senha correta: a rede é gravada na NVS, o LED fica verde e a placa **reinicia já conectada**. Anote o IP mostrado (ou use `http://nfc.local`).
@@ -222,6 +223,7 @@ Na versão **2.1.0-diag**, validar o cartão e consultar o histórico deixaram d
 * **Índice de cartões em RAM:** `cartoes.json` é lido uma vez no boot e mantido em PSRAM/heap; cada aproximação vira uma busca em memória. O índice é reconstruído em toda rota que grava a base (cadastro, edição, exclusão, sincronização e restauração de backup).
 * **Histórico em lista circular de 50 eventos na RAM:** `GET /api/log` responde da memória, sem os ~39 ms de leitura da Flash por poll do painel.
 * **Gravação em lote:** o histórico é gravado na Flash no máximo a cada **~1,5 s** e é descarregado antes de reiniciar (comando, OTA e troca de Wi-Fi).
+* **Tempo de validação visível:** cada acesso no log agora termina com `| validacao X ms`, que é só a busca no índice em RAM (0–1 ms mesmo com a base inteira). O `/api/status` expõe `nfc_ultimo_ms` e `cartoes_ram`/`historico_ram` para conferir o cache de fora.
 * **Fallback:** se faltar PSRAM/heap, o firmware volta ao comportamento antigo (lê e grava direto na Flash).
 
 Efeito prático: resposta mais rápida na portaria, menos desgaste da Flash e menos tempo com a trava de dados ocupada. Em **queda de energia**, os últimos ~1,5 s de histórico podem não ter sido gravados; em reinício normal nada se perde.
@@ -256,7 +258,7 @@ O ESP32 trabalha de forma integrada com a aplicação web escolar ([escola-nfc-w
 ### Rotas de Configuração de Wi-Fi:
 * `GET /wifi`: Página de configuração (aberta no modo AP; exige login do painel quando já conectado).
 * `GET /api/wifi/estado`: Modo atual, rede salva, IP, clientes do AP e andamento da tentativa de conexão. **Nunca devolve a senha.**
-* `GET /api/wifi/scan`: Lista de redes 2,4 GHz (`ssid`, `rssi`, `canal`, `seguranca`, `aberta`), com cache de 4 s; `?forcar=1` refaz a varredura.
+* `GET /api/wifi/scan`: Lista de redes 2,4 GHz (`ssid`, `rssi`, `canal`, `seguranca`, `aberta`), com cache de 4 s; `?forcar=1` refaz a varredura. **Só no modo AP** (em STA devolve `redes: []` com `motivo: "conectado"`); a varredura é assíncrona e a resposta pode vir com `scanning: true` — basta consultar de novo até `scanning: false`.
 * `POST /api/wifi/conectar`: Corpo JSON `{"ssid":"...","senha":"..."}`. Inicia a tentativa em segundo plano (não bloqueia o NFC nem o painel) e devolve `202`.
 * `POST /api/wifi/esquecer`: Apaga a rede da NVS e reinicia no modo AP.
 
