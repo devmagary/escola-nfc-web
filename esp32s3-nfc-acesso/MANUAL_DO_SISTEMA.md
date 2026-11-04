@@ -63,11 +63,11 @@ O módulo PN532 possui duas pequenas chavinhas brancas numeradas **1** e **2**. 
 | **GND** | **GND** | Terra (Negativo) | Referência elétrica comum. |
 | **SDA** | **GPIO 8** (Barra amarela) | Dados I2C | Linha de comunicação de dados. |
 | **SCL** | **GPIO 9** (Barra amarela) | Clock I2C | Linha de sincronismo do barramento I2C. |
-| **RST** (RSTPD) | **GPIO 5** | Reset do módulo | **Obrigatório para a recuperação automática.** O firmware pulsa este pino no `begin()`; sem ele, um PN532 travado só volta desligando a alimentação. |
+| **RST** (RSTPD) | **GPIO 5** (opcional) | Reset do módulo | **Não é necessário para o I2C** — o leitor funciona com 4 fios. Serve para o firmware forçar um reset quando o módulo trava; sem ele, não existe recuperação automática e a saída é desligar/religar a placa. |
 | **IRQ** | **GPIO 2** (opcional) | Interrupção | Em I2C a biblioteca consulta o byte RDY e não usa a IRQ; ligar evita um fio solto e melhora a imunidade. |
 
-> [!WARNING]
-> **Não deixe o pino RST do PN532 solto.** O firmware já usa **GPIO 5** como reset (é o que permite reconectar sozinho quando o módulo para de responder). Com apenas 4 fios, o RST fica flutuando e o módulo pode travar depois de alguns cartões — sintoma clássico de “funcionou duas vezes e parou”. Ligue **RST → GPIO 5** e **IRQ → GPIO 2** (IRQ opcional).
+> [!NOTE]
+> **4 fios bastam para ler cartões.** O RST e a IRQ são opcionais. A diferença do RST aparece só numa falha: com o fio, o firmware reinicia o módulo sozinho; sem ele, é preciso desligar/religar a placa. A IRQ não é usada em I2C.
 
 > [!WARNING]
 > **Pinos Protegidos no S3 N16R8:**
