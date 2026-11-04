@@ -1,24 +1,33 @@
 ﻿# =============================================================================
-# lab-menu.ps1 — TUI do laboratório offline (Acesso Escolar NFC)
+# lab-menu.ps1 — TUI unificada do laboratório offline (Acesso Escolar NFC)
 # ---------------------------------------------------------------------------
-# Menu em texto com navegação por setas, e ações diretas:
-#   lab-menu.ps1                 → abre o menu (setas + Enter, ou 1..5)
-#   lab-menu.ps1 -Acao ligar     → liga Docker + banco + painel
+# Tela única: luzes de estado ao vivo (Docker, Banco, Painel, Placa ESP32),
+# menu com setas/números e todas as ações do dia a dia em um só lugar:
+#
+#   lab-menu.ps1                 → abre a TUI (setas + Enter, 1..9, ESC sai)
+#   lab-menu.ps1 -Acao ligar     → liga Docker + banco + painel (janela dedicada)
 #   lab-menu.ps1 -Acao desligar  → fecha o painel e guarda o banco
 #   lab-menu.ps1 -Acao checar    → diagnóstico em português
 #   lab-menu.ps1 -Acao enderecos → endereços para o tablet
+#   lab-menu.ps1 -Acao backup    → dump de dados em supabase/backup.sql
 #   lab-menu.ps1 -Acao zerar     → lab:reset + lab:admin (APAGA cadastros)
-# Compatível com Windows PowerShell 5.1 (não exige nada além do que já existe).
+#
+# Compatível com Windows PowerShell 5.1 (nada além do que o Windows já tem).
 # =============================================================================
 param([string]$Acao = '', [switch]$SemPausa)
 
 try {
-  # Força UTF-8 na saída do console (normaliza acentos em janela e em redirecionamento).
+  # Força UTF-8 na saída do console (normaliza acentos na janela e ao redirecionar).
   [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 } catch { }
+try { [Console]::CursorVisible = $false } catch { }
 
 $script:Projeto = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $script:Projeto
+
+# =============================================================================
+# Utilidades de infraestrutura (testes de saúde e chamadas npm)
+# =============================================================================
 
 function Npm {
   param([string]$Comando)
@@ -42,6 +51,21 @@ function Testar-Painel {
     $resposta = Invoke-WebRequest -Uri 'http://localhost:5500/' -Method Head -TimeoutSec 4 -UseBasicParsing
     return ($resposta.StatusCode -eq 200)
   } catch { return $false }
+}
+
+function Testar-Placa {
+  # 0 = placa inacessível; 1 = acessível mas leitor fora; 2 = pronta (leitor OK)
+  $urlPlaca = 'http://192.168.0.73'
+  try {
+    $linhas = Get-Content (Join-Path $script:Projeto '.env.local') -ErrorAction SilentlyContinue |
+      Where-Object { $_ -match '^ESP_URL\s*=' }
+    if ($linhas) { $urlPlaca = (($linhas[0] -split '=', 2)[1]).Trim() }
+  } catch { }
+  try {
+    $resposta = Invoke-WebRequest -Uri ($urlPlaca.TrimEnd('/') + '/api/ultimo') -TimeoutSec 4 -UseBasicParsing
+    if ($resposta.Content -match '"nfc_ok"\s*:\s*true') { return 2 }
+    return 1
+  } catch { return 0 }
 }
 
 function Pegar-IP {
@@ -71,6 +95,10 @@ function Esperar-Docker {
   return $false
 }
 
+# =============================================================================
+# Ações (cada uma roda em tela limpa, com saída visível, e volta ao quadro)
+# =============================================================================
+
 function Iniciar-Laboratorio {
   Write-Host ''
   Write-Host '  1) Docker Desktop' -ForegroundColor White
@@ -81,7 +109,7 @@ function Iniciar-Laboratorio {
     Escrever-Positivo 'o banco já está no ar.'
   } else {
     Write-Host '  Subindo o banco (demora 1-2 min; na primeira vez baixa as peças)...' -ForegroundColor Yellow
-    Write-Host '  Se aparecer um trecho JSON com "Error" no meio, é só a espera do container: pode ignorar se o [OK] vier depois.' -ForegroundColor DarkGray
+    Write-Host '  Se aparecer um trecho JSON com "Error" no meio, é só a espera do container: ignore se o [OK] vier depois.' -ForegroundColor DarkGray
     Npm 'lab:start'
     $ligou = $false
     for ($espera = 1; $espera -le 6; $espera++) {
@@ -89,7 +117,7 @@ function Iniciar-Laboratorio {
       Start-Sleep -Seconds 5
     }
     if ($ligou) { Escrever-Positivo 'banco ligado.' }
-    else { Escrever-Negativo 'o banco não respondeu. Use 3) checar para ver o detalhe.' }
+    else { Escrever-Negativo 'o banco não respondeu. Use a opção Checar para ver o detalhe.' }
   }
 
   Write-Host '  3) Painel (site do laboratório)' -ForegroundColor White
@@ -125,6 +153,40 @@ function Parar-Laboratorio {
   else { Npm 'lab:stop'; Escrever-Positivo 'banco guardado nos caixotes do Docker. Nada foi apagado.' }
 }
 
+function Checar-Laboratorio {
+  Npm 'lab:check'
+}
+
+function Abrir-PainelNoNavegador {
+  if (-not (Testar-Painel)) {
+    Write-Host '  O painel não está no ar. Use "Ligar tudo" primeiro.' -ForegroundColor Yellow
+    return
+  }
+  $ip = Pegar-IP
+  $endereco = if ($ip) { "http://$ip`:5500" } else { 'http://localhost:5500' }
+  Start-Process $endereco
+  Write-Host ("  Abrindo o navegador no painel (" + $endereco + ")...") -ForegroundColor Green
+}
+
+function Ver-Enderecos {
+  Npm 'lab:ip'
+}
+
+function Liberar-Firewall {
+  Write-Host ''
+  Write-Host '  Vai abrir uma janela pedindo permissão de administrador: clique em "Sim".' -ForegroundColor Yellow
+  Start-Process -FilePath 'cmd.exe' -ArgumentList ("/c `"$script:Projeto\lab-firewall-liberar.cmd`"")
+  Write-Host '  (É o mesmo lab-firewall-liberar.cmd: libera o painel e o banco na rede da escola.)' -ForegroundColor DarkGray
+}
+
+function Fazer-Backup {
+  Npm 'lab:backup'
+  Write-Host ''
+  Write-Host '  O arquivo ficou em supabase\backup.sql (dentro da pasta do projeto).' -ForegroundColor Green
+  Write-Host '  Lembrando: o backup NÃO inclui usuários do login nem fotos; eles se recriam' -ForegroundColor DarkGray
+  Write-Host '  com a opção de admin e novo envio de fotos pelo painel. O que vale sempre é o git.' -ForegroundColor DarkGray
+}
+
 function Zerar-Laboratorio {
   Write-Host ''
   Write-Host '  ATENÇÃO: isto APAGA tudo o que foi cadastrado (alunos, fotos, histórico)' -ForegroundColor Red
@@ -137,47 +199,107 @@ function Zerar-Laboratorio {
   Write-Host '  No navegador, aperte F5 no painel e entre com o admin de novo.' -ForegroundColor Yellow
 }
 
+# =============================================================================
+# A TUI: quadro com luzes ao vivo + menu de setas + área de mensagens
+# =============================================================================
+
 $script:Opcoes = @(
-  @{ Texto = 'Ligar tudo (dia na escola)';           Valor = 'ligar' }
-  @{ Texto = 'Desligar tudo (fim do dia)';           Valor = 'desligar' }
-  @{ Texto = 'Checar a saúde do laboratório';        Valor = 'checar' }
-  @{ Texto = 'Ver os endereços para o tablet';       Valor = 'enderecos' }
-  @{ Texto = 'Recomeçar do zero (APAGA cadastros!)'; Valor = 'zerar' }
-  @{ Texto = 'Sair';                                 Valor = 'sair' }
+  @{ Texto = 'Ligar tudo (dia na escola)';            Valor = 'ligar' }
+  @{ Texto = 'Desligar tudo (fim do dia)';            Valor = 'desligar' }
+  @{ Texto = 'Checar a saúde do laboratório';         Valor = 'checar' }
+  @{ Texto = 'Abrir o painel no navegador';           Valor = 'abrir' }
+  @{ Texto = 'Ver os endereços para o tablet';        Valor = 'enderecos' }
+  @{ Texto = 'Liberar o firewall da rede da escola';  Valor = 'firewall' }
+  @{ Texto = 'Fazer backup dos dados';                Valor = 'backup' }
+  @{ Texto = 'Recomeçar do zero (APAGA cadastros!)';  Valor = 'zerar' }
+  @{ Texto = 'Sair (deixa tudo como está)';           Valor = 'sair' }
 )
 
-function Estado-Dashboard {
-  $partes = @()
-  if (Testar-Docker)   { $partes += , @{ Texto = 'Docker: ligado'; Ok = $true } }  else { $partes += , @{ Texto = 'Docker: parado'; Ok = $false } }
-  if (Testar-Supabase) { $partes += , @{ Texto = 'Banco: ligado';  Ok = $true } }  else { $partes += , @{ Texto = 'Banco: parado';  Ok = $false } }
-  if (Testar-Painel)   { $partes += , @{ Texto = 'Painel: ligado'; Ok = $true } } else { $partes += , @{ Texto = 'Painel: parado'; Ok = $false } }
-  return $partes
+$script:Mensagens = New-Object System.Collections.Generic.List[string]
+$script:Largura = 78
+$script:LinhaLuzes = 2
+$script:LinhaMenu = 0
+$script:LinhaLog = 0
+$script:LogMax = 8
+$script:Relogio = 0
+
+function Mensagem {
+  param([string]$Texto)
+  while ($script:Mensagens.Count -ge $script:LogMax) { $script:Mensagens.RemoveAt(0) }
+  $script:Mensagens.Add($Texto)
+  Repintar-Mensagens
 }
 
-function Desenhar-Menu {
-  param([int]$Selecionado)
+function Repintar-Mensagens {
+  $linha = $script:LinhaLog
+  foreach ($texto in $script:Mensagens) {
+    try {
+      [Console]::SetCursorPosition(4, $linha)
+      $cortado = $texto
+      $maximo = $script:Largura - 6
+      if ($cortado.Length -gt $maximo) { $cortado = $cortado.Substring(0, $maximo) }
+      Write-Host $cortado -NoNewline -ForegroundColor Gray
+      Write-Host (' ' * ($maximo - $cortado.Length)) -NoNewline
+    } catch { }
+    $linha++
+  }
+}
+
+function Escrever-Linha {
+  param([string]$Texto, [string]$Cor = 'White')
+  if ($Texto.Length -gt $script:Largura) { $Texto = $Texto.Substring(0, $script:Largura) }
+  Write-Host $Texto -ForegroundColor $Cor
+}
+
+function Desenhar-Quadro {
   Clear-Host
-  Write-Host '  ==================================================================' -ForegroundColor Cyan
-  Write-Host '    ACESSO ESCOLAR NFC - LABORATORIO OFFLINE' -ForegroundColor White
-  Write-Host '  ==================================================================' -ForegroundColor Cyan
-  Write-Host '    ' -NoNewline
-  $primeiro = $true
-  foreach ($parte in (Estado-Dashboard)) {
-    if (-not $primeiro) { Write-Host '   ' -NoNewline }
-    Write-Host $parte.Texto -NoNewline -ForegroundColor $(if ($parte.Ok) { 'Green' } else { 'Red' })
-    $primeiro = $false
+  $fina = '-' * $script:Largura
+  Write-Host ("  " + ('=' * $script:Largura)) -ForegroundColor Cyan
+  Escrever-Linha ('   ACESSO ESCOLAR NFC - LABORATORIO OFFLINE (dois cliques e roda)') 'White'
+  Write-Host ("  " + $fina) -ForegroundColor Cyan           # linha das luzes vem logo abaixo
+  $script:LinhaLuzes = [Console]::CursorTop
+  Write-Host ''                                          # reserva a linha das luzes
+  Write-Host ("  " + $fina) -ForegroundColor Cyan
+  Write-Host ''                                          # brecha entre luzes e menu
+  $script:LinhaMenu = [Console]::CursorTop
+  Write-Host ("  " + $fina) -ForegroundColor Cyan
+  Write-Host ''
+  Write-Host '   MENSAGENS:' -ForegroundColor DarkCyan
+  $script:LinhaLog = [Console]::CursorTop
+  for ($i = 0; $i -lt $script:LogMax; $i++) { Write-Host (' ' * $script:Largura) }
+  Write-Host ("  " + $fina) -ForegroundColor Cyan
+  Write-Host ''
+  Escrever-Linha '   Setas + Enter (ou números 1-8). ESC sai. Luzes se atualizam sozinhas.' 'DarkGray'
+  Desenhar-Luzes
+  Repintar-Mensagens
+}
+
+function Desenhar-Luzes {
+  $luzes = @()
+  if (Testar-Docker)   { $luzes += , @('Docker: ligado',       'Green') } else { $luzes += , @('Docker: parado', 'Red') }
+  if (Testar-Supabase) { $luzes += , @('Banco: ligado',        'Green') } else { $luzes += , @('Banco: parado',  'Red') }
+  if (Testar-Painel)   { $luzes += , @('Painel: ligado',       'Green') } else { $luzes += , @('Painel: parado', 'Red') }
+  $placa = Testar-Placa
+  if ($placa -eq 2)      { $luzes += , @('Placa: pronta',      'Green') }
+  elseif ($placa -eq 1)  { $luzes += , @('Placa: leitor fora', 'Yellow') }
+  else                   { $luzes += , @('Placa: ausente',     'Red') }
+  try { [Console]::SetCursorPosition(4, $script:LinhaLuzes) } catch { }
+  foreach ($luz in $luzes) {
+    Write-Host ($luz[0].PadRight(22)) -NoNewline -ForegroundColor $luz[1]
+  }
+}
+
+function Desenhar-MenuItem {
+  param([int]$Indice, [bool]$Selecionado)
+  $numero = "{0}) " -f ($Indice + 1)
+  $texto = ($numero + $script:Opcoes[$Indice].Texto).PadRight(50)
+  try { [Console]::SetCursorPosition(3, $script:LinhaMenu + $Indice) } catch { return }
+  if ($Selecionado) {
+    Write-Host ('> ' + $texto) -NoNewline -ForegroundColor Black -BackgroundColor Cyan
+  } else {
+    Write-Host ('  ' + $texto) -NoNewline -ForegroundColor White
   }
   Write-Host ''
-  Write-Host '  ------------------------------------------------------------------' -ForegroundColor Cyan
-  for ($i = 0; $i -lt $script:Opcoes.Count; $i++) {
-    if ($i -eq $Selecionado) {
-      Write-Host ('   > {0}' -f $script:Opcoes[$i].Texto) -ForegroundColor Black -BackgroundColor Cyan
-    } else {
-      Write-Host ('     {0}' -f $script:Opcoes[$i].Texto) -ForegroundColor White
-    }
-  }
-  Write-Host '  ------------------------------------------------------------------' -ForegroundColor Cyan
-  Write-Host '  Use as setas e Enter (ou 1, 2, 3...). ESC sai. Dica: 1 = ligar tudo.' -ForegroundColor DarkGray
 }
 
 function Ler-Opcao {
@@ -202,48 +324,85 @@ function Ler-Opcao {
     'D4'         { return @{ Indice = 3; Escolheu = $true } }
     'NumPad5'    { return @{ Indice = 4; Escolheu = $true } }
     'D5'         { return @{ Indice = 4; Escolheu = $true } }
+    'NumPad6'    { return @{ Indice = 5; Escolheu = $true } }
+    'D6'         { return @{ Indice = 5; Escolheu = $true } }
+    'NumPad7'    { return @{ Indice = 6; Escolheu = $true } }
+    'D7'         { return @{ Indice = 6; Escolheu = $true } }
+    'NumPad8'    { return @{ Indice = 7; Escolheu = $true } }
+    'D8'         { return @{ Indice = 7; Escolheu = $true } }
   }
   return @{ Indice = $Selecionado; Escolheu = $false }
 }
 
-function Rodar-Menu {
+function Rodar-TUI {
   $selecionado = 0
+  $selecionadoQuadro = 0
+  Desenhar-Quadro
+  for ($i = 0; $i -lt $script:Opcoes.Count; $i++) { Desenhar-MenuItem -Indice $i -Selecionado ($i -eq $selecionado) }
+  Mensagem 'Bem-vindo! A luz verde é o que está no ar. Use as setas + Enter.'
   while ($true) {
-    Desenhar-Menu -Selecionado $selecionado
-    $resposta = Ler-Opcao -Selecionado $selecionado
-    $selecionado = $resposta.Indice
-    if (-not $resposta.Escolheu) { continue }
-    $escolhido = $script:Opcoes[$selecionado].Valor
-    if ($escolhido -eq 'sair') { Clear-Host; break }
-    if ($escolhido -eq 'ligar')     { Iniciar-Laboratorio }
-    if ($escolhido -eq 'desligar')  { Parar-Laboratorio }
-    if ($escolhido -eq 'checar')    { Npm 'lab:check' }
-    if ($escolhido -eq 'enderecos') { Npm 'lab:ip' }
-    if ($escolhido -eq 'zerar')     { Zerar-Laboratorio }
-    Write-Host ''
-    $null = Read-Host '  Aperte Enter para voltar ao menu'
-    $selecionado = 0
+    if ([Console]::KeyAvailable) {
+      $resposta = Ler-Opcao -Selecionado $selecionado
+      $novo = $resposta.Indice
+      if ($novo -ne $selecionado) {
+        Desenhar-MenuItem -Indice $selecionado -Selecionado $false
+        Desenhar-MenuItem -Indice $novo -Selecionado $true
+        $selecionado = $novo
+      }
+      if ($resposta.Escolheu) {
+        $escolhido = $script:Opcoes[$selecionado].Valor
+        if ($escolhido -eq 'sair') { Clear-Host; try { [Console]::CursorVisible = $true } catch { }; return }
+        try { [Console]::CursorVisible = $true } catch { }
+        Clear-Host
+        switch ($escolhido) {
+          'ligar'     { Iniciar-Laboratorio;   Mensagem 'Ligar: subida concluída (veja [OK]/[XX] acima).' }
+          'desligar'  { Parar-Laboratorio;     Mensagem 'Desligar: painel fechado e banco guardado.' }
+          'checar'    { Checar-Laboratorio;    Mensagem 'Checar: diagnóstico concluído; [OK] verde significa tudo bem.' }
+          'abrir'     { Abrir-PainelNoNavegador; Mensagem 'Abrir: navegador enviado ao painel.' }
+          'enderecos' { Ver-Enderecos;         Mensagem 'Endereços: mostrados acima (digite no tablet).' }
+          'firewall'  { Liberar-Firewall;      Mensagem 'Firewall: confirme com "Sim" na janela do Windows.' }
+          'backup'    { Fazer-Backup;          Mensagem 'Backup: salvo em supabase\backup.sql.' }
+          'zerar'     { Zerar-Laboratorio;     Mensagem 'Zerar: banco refeito com os 6 alunos de demonstração.' }
+        }
+        Write-Host ''
+        $null = Read-Host 'Aperte Enter para voltar'
+        try { [Console]::CursorVisible = $false } catch { }
+        Desenhar-Quadro
+        $selecionado = 0
+      }
+    } else {
+      Start-Sleep -Milliseconds 500
+      $script:Relogio = $script:Relogio + 1
+      if ($script:Relogio % 4 -eq 0) { Desenhar-Luzes }
+    }
   }
 }
+
+# =============================================================================
+# Entrada
+# =============================================================================
 
 try {
   if ($Acao -ne '') {
     switch ($Acao.ToLower()) {
       'ligar'     { Iniciar-Laboratorio }
       'desligar'  { Parar-Laboratorio }
-      'checar'    { Npm 'lab:check' }
-      'enderecos' { Npm 'lab:ip' }
+      'checar'    { Checar-Laboratorio }
+      'enderecos' { Ver-Enderecos }
+      'backup'    { Fazer-Backup }
       'zerar'     { Zerar-Laboratorio }
       default     { Write-Host ("Ação desconhecida: " + $Acao) -ForegroundColor Red }
     }
     Write-Host ''
     if (-not $SemPausa) { $null = Read-Host 'Aperte Enter para fechar esta janela' }
   } else {
-    Rodar-Menu
+    Rodar-TUI
   }
 } catch {
   Write-Host ''
   Write-Host ('  Deu problema: ' + $_.Exception.Message) -ForegroundColor Red
   Write-Host '  Feche esta janela e tente de novo. Se persistir, rode no terminal: npm run lab:check' -ForegroundColor Yellow
   if (-not $SemPausa) { $null = Read-Host 'Aperte Enter para fechar esta janela' }
+} finally {
+  try { [Console]::CursorVisible = $true } catch { }
 }

@@ -1,36 +1,36 @@
 ﻿# =============================================================================
-# lab-atalhos.ps1 — cria atalhos do laboratório na área de trabalho do Windows
+# lab-atalhos.ps1 — atalho único "Servidor NFC" na área de trabalho do Windows
 # ---------------------------------------------------------------------------
-# Cada atalho abre um dos utilitários da pasta do projeto (Menu/Ligar/Desligar/
-# Checar) com o diretório de trabalho correto. Pode rodar mais de uma vez:
-# apenas recria os mesmos atalhos.
+# Cria (ou recria) o atalho do laboratório de duplo clique, que abre a TUI
+# unificada (menu com luzes ao vivo). Remove os atalhos antigos individuais
+# se ainda existirem. Pode rodar mais de uma vez.
 # =============================================================================
 try {
   [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 } catch { }
 
 $script:Projeto = Split-Path -Parent $MyInvocation.MyCommand.Path
-
 $areaDeTrabalho = [Environment]::GetFolderPath('Desktop')
 $shell = New-Object -ComObject WScript.Shell
 
-$atalhos = @(
-  @{ Nome = 'Servidor NFC - Menu';      Arquivo = 'lab.cmd' }
-  @{ Nome = 'Servidor NFC - LIGAR';     Arquivo = 'lab-ligar.cmd' }
-  @{ Nome = 'Servidor NFC - DESLIGAR';  Arquivo = 'lab-desligar.cmd' }
-  @{ Nome = 'Servidor NFC - CHECAR';    Arquivo = 'lab-checar.cmd' }
-)
-
-foreach ($atalho in $atalhos) {
-  $caminhoDoAtalho = Join-Path $areaDeTrabalho ($atalho.Nome + '.lnk')
-  $link = $shell.CreateShortcut($caminhoDoAtalho)
-  $link.TargetPath = Join-Path $script:Projeto $atalho.Arquivo
-  $link.WorkingDirectory = $script:Projeto
-  $link.Description = 'Acesso Escolar NFC - laboratorio offline (Docker)'
-  $link.Save()
-  Write-Host ("  Atalho criado: " + $atalho.Nome) -ForegroundColor Green
+# 1) Remove os atalhos individuais antigos (nomes exatos que este script criou).
+foreach ($antigo in @('Servidor NFC - Menu', 'Servidor NFC - LIGAR', 'Servidor NFC - DESLIGAR', 'Servidor NFC - CHECAR')) {
+  $caminhoAntigo = Join-Path $areaDeTrabalho ($antigo + '.lnk')
+  if (Test-Path $caminhoAntigo) {
+    Remove-Item $caminhoAntigo -Force
+    Write-Host ("  Atalho antigo removido: " + $antigo) -ForegroundColor DarkGray
+  }
 }
 
+# 2) Cria o atalho único da TUI unificada.
+$caminhoDoAtalho = Join-Path $areaDeTrabalho 'Servidor NFC.lnk'
+$link = $shell.CreateShortcut($caminhoDoAtalho)
+$link.TargetPath = Join-Path $script:Projeto 'lab.cmd'
+$link.WorkingDirectory = $script:Projeto
+$link.Description = 'Acesso Escolar NFC - laboratorio offline (Docker, sem internet)'
+$link.Save()
+Write-Host '  Atalho criado na area de trabalho: Servidor NFC' -ForegroundColor Green
+
 Write-Host ''
-Write-Host '  Pronto! Olhe a área de trabalho. Se algum atalho não aparecer,' -ForegroundColor Yellow
-Write-Host '  clique com o botão direito na área de trabalho e escolha Atualizar.' -ForegroundColor Yellow
+Write-Host '  Duplo clique nele abre o painel de luzes com o menu (ligar/desligar/' -ForegroundColor Yellow
+Write-Host '  checar/abrir painel/enderecos/firewall/backup/zerar). ESC sai.' -ForegroundColor Yellow
