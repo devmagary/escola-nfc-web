@@ -112,7 +112,7 @@ const char* ARQ_HISTORICO = "/historico.json";
 #define MAX_HISTORICO_LOG 50
 
 // Versão desta build de diagnóstico (aparece em /api/status e /api/diagnostico).
-#define FW_VERSAO "2.0.0-diag"
+#define FW_VERSAO "2.1.0-diag"
 
 // Limiares do diagnóstico de desempenho (ms). Eventos acima disso são
 // registrados no buffer circular e, com rate-limit, no console.
@@ -576,6 +576,175 @@ bool carregarJsonDoArquivo(const char* caminho, JsonDocument& doc) {
   return (erro == DeserializationError::Ok);
 }
 
+// =====================================================================
+// Cache em RAM de cartões e histórico (na PSRAM, que ficava ociosa)
+//
+// Antes, CADA aproximação de cartão lia cartoes.json da flash e o histórico
+// era lido+reescrito inteiro. Com a base sincronizada do Supabase isso vira
+// centenas de ms por leitura, segurando a trava de dados. Agora a flash só é
+// tocada no boot e nas alterações; a validação do cartão é uma busca em RAM.
+// =====================================================================
+
+struct CartaoRam {
+  char uid[24];
+  char nome[72];
+  bool ativo;
+};
+
+struct HistoricoRam {
+  char     uid[24];
+  char     nome[72];
+  char     dh[24];
+  uint32_t tempo;
+  uint8_t  res;
+};
+
+CartaoRam*   cartoesRam = nullptr;
+uint16_t     cartoesRamTotal = 0;
+uint16_t     cartoesRamCapacidade = 0;
+bool         cartoesRamValido = false;
+
+HistoricoRam* historicoRam = nullptr;
+uint16_t      historicoRamTotal = 0;
+bool          historicoSujo = false;
+uint32_t      historicoUltimaGravacaoMs = 0;
+
+void* alocarRamPreferindoPsram(size_t bytes) {
+  void* p = nullptr;
+  if (ESP.getPsramSize() > 0) p = ps_malloc(bytes);
+  if (!p) p = malloc(bytes);
+  return p;
+}
+
+// (Re)constrói o índice de cartões a partir de um documento já carregado.
+bool indiceDoDocumento(JsonDocument& doc) {
+  JsonArray arr = doc.as<JsonArray>();
+  uint16_t capacidade = (uint16_t)arr.size() + 8;
+
+  if (capacidade != cartoesRamCapacidade) {
+    CartaoRam* novo = (CartaoRam*)alocarRamPreferindoPsram(sizeof(CartaoRam) * capacidade);
+    if (!novo) {
+      cartoesRamValido = false;
+      Serial.println("[RAM] Sem memoria para o indice de cartoes; mantendo a leitura da Flash.");
+      return false;
+    }
+    if (cartoesRam) free(cartoesRam);
+    cartoesRam = novo;
+    cartoesRamCapacidade = capacidade;
+  }
+
+  cartoesRamTotal = 0;
+  for (JsonObject c : arr) {
+    if (cartoesRamTotal >= cartoesRamCapacidade) break;
+    CartaoRam& item = cartoesRam[cartoesRamTotal++];
+    strlcpy(item.uid, c["uid"].as<String>().c_str(), sizeof(item.uid));
+    strlcpy(item.nome, c["nome"].as<String>().c_str(), sizeof(item.nome));
+    item.ativo = c["ativo"].as<bool>();
+  }
+  cartoesRamValido = true;
+  return true;
+}
+
+bool reconstruirIndiceCartoes() {
+  if (!fsPtr) { cartoesRamValido = false; return false; }
+  JsonDocument doc;
+  if (!carregarJsonDoArquivo(ARQ_CARTOES, doc)) { cartoesRamValido = false; return false; }
+  return indiceDoDocumento(doc);
+}
+
+// Busca sem tocar na flash. Retorna false se o UID não estiver cadastrado.
+bool consultarCartaoRam(const String& uid, bool* ativo, String* nome) {
+  if (!cartoesRamValido || !cartoesRam) return false;
+  for (uint16_t i = 0; i < cartoesRamTotal; i++) {
+    if (strcasecmp(cartoesRam[i].uid, uid.c_str()) == 0) {
+      if (ativo) *ativo = cartoesRam[i].ativo;
+      if (nome) *nome = cartoesRam[i].nome;
+      return true;
+    }
+  }
+  return false;
+}
+
+void garantirHistoricoRam() {
+  if (historicoRam) return;
+  historicoRam = (HistoricoRam*)alocarRamPreferindoPsram(sizeof(HistoricoRam) * MAX_HISTORICO_LOG);
+  if (!historicoRam) {
+    Serial.println("[RAM] Sem memoria para o historico; voltando a gravar direto na Flash.");
+  }
+}
+
+void carregarHistoricoRam() {
+  garantirHistoricoRam();
+  if (!historicoRam || !fsPtr) return;
+  historicoRamTotal = 0;
+
+  JsonDocument doc;
+  if (!carregarJsonDoArquivo(ARQ_HISTORICO, doc)) return;
+  JsonArray arr = doc.as<JsonArray>();
+  for (JsonObject item : arr) {
+    if (historicoRamTotal >= MAX_HISTORICO_LOG) break;
+    HistoricoRam& h = historicoRam[historicoRamTotal++];
+    strlcpy(h.uid, item["uid"].as<String>().c_str(), sizeof(h.uid));
+    strlcpy(h.nome, item["nome"].as<String>().c_str(), sizeof(h.nome));
+    strlcpy(h.dh, item["dh"].as<String>().c_str(), sizeof(h.dh));
+    h.tempo = item["tempo"].as<uint32_t>();
+    h.res = item["res"].as<uint8_t>();
+  }
+}
+
+// Insere no início da lista circular (mais novo primeiro), sem gravar na flash.
+void adicionarHistoricoRam(const String& uid, const String& nome, uint8_t res) {
+  garantirHistoricoRam();
+  if (!historicoRam) return;
+
+  uint16_t total = historicoRamTotal;
+  if (total < MAX_HISTORICO_LOG) total++;
+  for (int i = (int)total - 1; i > 0; i--) historicoRam[i] = historicoRam[i - 1];
+
+  HistoricoRam& h = historicoRam[0];
+  strlcpy(h.uid, uid.c_str(), sizeof(h.uid));
+  strlcpy(h.nome, nome.c_str(), sizeof(h.nome));
+  String dh = obterDataHoraAtual();
+  strlcpy(h.dh, dh.c_str(), sizeof(h.dh));
+  h.tempo = millis();
+  h.res = res;
+
+  historicoRamTotal = total;
+  historicoSujo = true;
+  if (historicoUltimaGravacaoMs == 0) historicoUltimaGravacaoMs = millis();
+}
+
+// Grava o histórico no máximo a cada 1,5 s (agrupa acessos seguidos e poupa a
+// flash). Roda no Core 1; a cópia é feita sob a trava de dados.
+void gravarHistoricoSePreciso() {
+  if (!historicoSujo || !historicoRam || !fsPtr) return;
+  if (millis() - historicoUltimaGravacaoMs < 1500) return;
+
+  JsonDocument doc;
+  xSemaphoreTake(travaDados, portMAX_DELAY);
+  historicoSujo = false;
+  historicoUltimaGravacaoMs = millis();
+  JsonArray arr = doc.to<JsonArray>();
+  for (uint16_t i = 0; i < historicoRamTotal; i++) {
+    JsonObject item = arr.add<JsonObject>();
+    item["uid"] = historicoRam[i].uid;
+    item["nome"] = historicoRam[i].nome;
+    item["res"] = historicoRam[i].res;
+    item["dh"] = historicoRam[i].dh;
+    item["tempo"] = historicoRam[i].tempo;
+  }
+  xSemaphoreGive(travaDados);
+
+  salvarJsonNoArquivo(ARQ_HISTORICO, doc);
+}
+
+// Usado antes de reiniciar: não perde os últimos acessos da janela de 1,5 s.
+void gravarHistoricoAgora() {
+  if (!historicoSujo) return;
+  historicoUltimaGravacaoMs = millis() - 5000;
+  gravarHistoricoSePreciso();
+}
+
 void inicializarArquivosDados() {
   imprimirDiagnosticoFlash();
 
@@ -606,10 +775,24 @@ void inicializarArquivosDados() {
     doc.to<JsonArray>();
     salvarJsonNoArquivo(ARQ_HISTORICO, doc);
   }
+
+  // Carrega uma vez para a PSRAM: daqui em diante a leitura de cartão e a
+  // listagem do histórico não tocam mais na flash.
+  reconstruirIndiceCartoes();
+  carregarHistoricoRam();
+  Serial.printf("[RAM] Indice de cartoes: %u | historico: %u evento(s)\n",
+                (unsigned)cartoesRamTotal, (unsigned)historicoRamTotal);
 }
 
 void registrarAcessoNoHistorico(String uid, String nome, uint8_t res) {
   if (!fsPtr) return;
+  garantirHistoricoRam();
+  if (historicoRam) {
+    adicionarHistoricoRam(uid, nome, res);
+    return;
+  }
+
+  // Fallback sem RAM (PSRAM/heap esgotados): grava direto na flash.
   JsonDocument doc;
   carregarJsonDoArquivo(ARQ_HISTORICO, doc);
 
@@ -696,8 +879,11 @@ void processarLeituraNfc(String uidFormatado) {
   bool ativo = false;
   String nome = "";
 
-  // Busca o cartão no arquivo JSON se a memória estiver disponível
-  if (fsPtr) {
+  // Busca no índice em RAM (sem tocar na flash). Se o índice não pôde ser
+  // montado, cai no caminho antigo lendo o arquivo.
+  if (cartoesRamValido) {
+    encontrado = consultarCartaoRam(uidFormatado, &ativo, &nome);
+  } else if (fsPtr) {
     JsonDocument doc;
     carregarJsonDoArquivo(ARQ_CARTOES, doc);
     JsonArray arr = doc.as<JsonArray>();
@@ -971,6 +1157,7 @@ void rotaAdicionarCartao() {
   novo["ativo"] = ativo;
 
   salvarJsonNoArquivo(ARQ_CARTOES, doc);
+  indiceDoDocumento(doc); // mantém a validação em RAM sincronizada com a flash
   xSemaphoreGive(travaDados);
 
   Serial.printf("[WEB] Cartao cadastrado: %s (%s)\n", uid.c_str(), nome.c_str());
@@ -1034,6 +1221,7 @@ void rotaAtualizarCartao() {
   }
 
   salvarJsonNoArquivo(ARQ_CARTOES, doc);
+  indiceDoDocumento(doc); // mantém a validação em RAM sincronizada com a flash
   xSemaphoreGive(travaDados);
 
   responderJson(200, "{\"ok\":true}");
@@ -1066,6 +1254,7 @@ void rotaExcluirCartao() {
 
   arr.remove(indexRemover);
   salvarJsonNoArquivo(ARQ_CARTOES, doc);
+  indiceDoDocumento(doc); // mantém a validação em RAM sincronizada com a flash
   xSemaphoreGive(travaDados);
 
   Serial.printf("[WEB] Cartao removido: %s\n", uid.c_str());
@@ -1094,6 +1283,7 @@ void rotaRestaurarBackup() {
 
   xSemaphoreTake(travaDados, portMAX_DELAY);
   salvarJsonNoArquivo(ARQ_CARTOES, doc);
+  indiceDoDocumento(doc); // mantém a validação em RAM sincronizada com a flash
   xSemaphoreGive(travaDados);
 
   responderJson(200, "{\"ok\":true}");
@@ -1149,6 +1339,7 @@ void rotaSincronizarAluno() {
   }
 
   salvarJsonNoArquivo(ARQ_CARTOES, doc);
+  indiceDoDocumento(doc); // mantém a validação em RAM sincronizada com a flash
   xSemaphoreGive(travaDados);
 
   String logMsg = "[SYNC] Aluno " + (nome.isEmpty() ? uid : nome) + " atualizado para " + (ativo ? "LIBERADO" : "BLOQUEADO");
@@ -1171,6 +1362,7 @@ void rotaSincronizarTodosAlunos() {
 
   xSemaphoreTake(travaDados, portMAX_DELAY);
   salvarJsonNoArquivo(ARQ_CARTOES, doc);
+  indiceDoDocumento(doc); // mantém a validação em RAM sincronizada com a flash
   xSemaphoreGive(travaDados);
 
   int total = doc.as<JsonArray>().size();
@@ -1209,6 +1401,7 @@ void rotaRemoverAlunoSincronizado() {
   if (idx >= 0) {
     arr.remove(idx);
     salvarJsonNoArquivo(ARQ_CARTOES, doc);
+    indiceDoDocumento(doc);
   }
   xSemaphoreGive(travaDados);
 
@@ -1247,19 +1440,24 @@ void rotaUltimoCartao() {
 
 void rotaObterLog() {
   if (!autenticarRequisicao()) return;
-  if (!fsPtr) return responderJson(200, "[]");
+  if (!historicoRam) return responderJson(200, "[]");
+
+  // Serve do cache em RAM: nenhuma leitura de flash por poll do painel/página.
+  JsonDocument doc;
+  uint32_t agora = millis();
 
   xSemaphoreTake(travaDados, portMAX_DELAY);
-  JsonDocument doc;
-  carregarJsonDoArquivo(ARQ_HISTORICO, doc);
-  xSemaphoreGive(travaDados);
-
-  uint32_t agora = millis();
-  JsonArray arr = doc.as<JsonArray>();
-  for (JsonObject item : arr) {
-    uint32_t tempo = item["tempo"].as<uint32_t>();
-    item["ha"] = (agora >= tempo) ? (agora - tempo) / 1000 : 0;
+  JsonArray arr = doc.to<JsonArray>();
+  for (uint16_t i = 0; i < historicoRamTotal; i++) {
+    JsonObject item = arr.add<JsonObject>();
+    item["uid"] = historicoRam[i].uid;
+    item["nome"] = historicoRam[i].nome;
+    item["res"] = historicoRam[i].res;
+    item["dh"] = historicoRam[i].dh;
+    item["tempo"] = historicoRam[i].tempo;
+    item["ha"] = (agora >= historicoRam[i].tempo) ? (agora - historicoRam[i].tempo) / 1000 : 0;
   }
+  xSemaphoreGive(travaDados);
 
   String s;
   serializeJson(doc, s);
@@ -1271,6 +1469,8 @@ void rotaLimparLog() {
   if (!fsPtr) return responderJson(200, "{\"ok\":true}");
 
   xSemaphoreTake(travaDados, portMAX_DELAY);
+  if (historicoRam) historicoRamTotal = 0;
+  historicoSujo = false;
   JsonDocument doc;
   doc.to<JsonArray>();
   salvarJsonNoArquivo(ARQ_HISTORICO, doc);
@@ -1706,6 +1906,7 @@ void processarTentativaWifi() {
   if (wifiReiniciarEm && millis() >= wifiReiniciarEm) {
     wifiReiniciarEm = 0;
     Serial.println("[SISTEMA] Reiniciando para aplicar a configuracao de Wi-Fi...");
+    gravarHistoricoAgora();
     delay(150);
     ESP.restart();
   }
@@ -1847,6 +2048,7 @@ void rotaComandoConsole() {
   } else if (cmd == "reboot") {
     logSerial("[SISTEMA] Reiniciando ESP32 por comando remoto...", "err");
     responderJson(200, "{\"ok\":true, \"msg\":\"Reiniciando placa em 1 segundo...\"}");
+    gravarHistoricoAgora();
     delay(1000);
     ESP.restart();
     return;
@@ -1871,6 +2073,7 @@ void rotaOtaFinalizar() {
   if (!autenticarRequisicao()) return;
   server.sendHeader("Connection", "close");
   server.send(200, "text/plain", (Update.hasError()) ? "FALHA" : "OK");
+  gravarHistoricoAgora();
   delay(1000);
   ESP.restart();
 }
@@ -2343,6 +2546,7 @@ void loop() {
   processarTentativaWifi();
   atualizarSaidaFechadura();
   atualizarLedStatus();
+  gravarHistoricoSePreciso(); // grava o histórico em lote (no máximo a cada 1,5 s)
 
   uint32_t totalMs = (micros() - inicioLoopUs) / 1000;
   if (totalMs > diagLoopMaxMs) diagLoopMaxMs = totalMs;
