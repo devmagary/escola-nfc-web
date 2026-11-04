@@ -586,14 +586,14 @@ bool carregarJsonDoArquivo(const char* caminho, JsonDocument& doc) {
 // =====================================================================
 
 struct CartaoRam {
-  char uid[24];
-  char nome[72];
+  char uid[40];   // UID de 10 bytes formatado ("AA:..:JJ") ocupa 29 caracteres
+  char nome[128];
   bool ativo;
 };
 
 struct HistoricoRam {
-  char     uid[24];
-  char     nome[72];
+  char     uid[40];
+  char     nome[128];
   char     dh[24];
   uint32_t tempo;
   uint8_t  res;
@@ -608,6 +608,7 @@ HistoricoRam* historicoRam = nullptr;
 uint16_t      historicoRamTotal = 0;
 bool          historicoSujo = false;
 uint32_t      historicoUltimaGravacaoMs = 0;
+uint32_t      historicoSeqGerado = 0; // detecta eventos novos durante a gravação
 
 void* alocarRamPreferindoPsram(size_t bytes) {
   void* p = nullptr;
@@ -619,10 +620,13 @@ void* alocarRamPreferindoPsram(size_t bytes) {
 // (Re)constrói o índice de cartões a partir de um documento já carregado.
 bool indiceDoDocumento(JsonDocument& doc) {
   JsonArray arr = doc.as<JsonArray>();
-  uint16_t capacidade = (uint16_t)arr.size() + 8;
+  uint16_t necessario = (uint16_t)arr.size() + 8;
 
-  if (capacidade != cartoesRamCapacidade) {
-    CartaoRam* novo = (CartaoRam*)alocarRamPreferindoPsram(sizeof(CartaoRam) * capacidade);
+  // A capacidade só cresce: cadastrar/remover um cartão não realoca a lista
+  // inteira a cada edição. Se faltar memória, mantém o ponteiro antigo e marca
+  // o índice como inválido (a validação volta a ler a flash, que já foi gravada).
+  if (necessario > cartoesRamCapacidade) {
+    CartaoRam* novo = (CartaoRam*)alocarRamPreferindoPsram(sizeof(CartaoRam) * necessario);
     if (!novo) {
       cartoesRamValido = false;
       Serial.println("[RAM] Sem memoria para o indice de cartoes; mantendo a leitura da Flash.");
@@ -630,7 +634,7 @@ bool indiceDoDocumento(JsonDocument& doc) {
     }
     if (cartoesRam) free(cartoesRam);
     cartoesRam = novo;
-    cartoesRamCapacidade = capacidade;
+    cartoesRamCapacidade = necessario;
   }
 
   cartoesRamTotal = 0;
@@ -667,6 +671,11 @@ bool consultarCartaoRam(const String& uid, bool* ativo, String* nome) {
 
 void garantirHistoricoRam() {
   if (historicoRam) return;
+  // Se a alocação falhar, evita tentar de novo a cada cartão (backoff de 60 s).
+  static uint32_t ultimaTentativaMs = 0;
+  if (ultimaTentativaMs != 0 && millis() - ultimaTentativaMs < 60000) return;
+  ultimaTentativaMs = millis();
+
   historicoRam = (HistoricoRam*)alocarRamPreferindoPsram(sizeof(HistoricoRam) * MAX_HISTORICO_LOG);
   if (!historicoRam) {
     Serial.println("[RAM] Sem memoria para o historico; voltando a gravar direto na Flash.");
@@ -694,8 +703,13 @@ void carregarHistoricoRam() {
 
 // Insere no início da lista circular (mais novo primeiro), sem gravar na flash.
 void adicionarHistoricoRam(const String& uid, const String& nome, uint8_t res) {
-  garantirHistoricoRam();
-  if (!historicoRam) return;
+  if (!historicoRam) {
+    garantirHistoricoRam();
+    if (!historicoRam) return;
+    // A RAM passou a existir agora: traz o histórico que estava na flash para
+    // não sobrescrevê-lo com um único evento na próxima gravação.
+    carregarHistoricoRam();
+  }
 
   uint16_t total = historicoRamTotal;
   if (total < MAX_HISTORICO_LOG) total++;
@@ -710,20 +724,22 @@ void adicionarHistoricoRam(const String& uid, const String& nome, uint8_t res) {
   h.res = res;
 
   historicoRamTotal = total;
+  historicoSeqGerado++;
   historicoSujo = true;
   if (historicoUltimaGravacaoMs == 0) historicoUltimaGravacaoMs = millis();
 }
 
 // Grava o histórico no máximo a cada 1,5 s (agrupa acessos seguidos e poupa a
 // flash). Roda no Core 1; a cópia é feita sob a trava de dados.
-void gravarHistoricoSePreciso() {
+void gravarHistoricoInterno(bool forcar) {
   if (!historicoSujo || !historicoRam || !fsPtr) return;
-  if (millis() - historicoUltimaGravacaoMs < 1500) return;
+  if (!forcar && millis() - historicoUltimaGravacaoMs < 1500) return;
 
   JsonDocument doc;
+  uint32_t seqDaCopia;
+
   xSemaphoreTake(travaDados, portMAX_DELAY);
-  historicoSujo = false;
-  historicoUltimaGravacaoMs = millis();
+  seqDaCopia = historicoSeqGerado;
   JsonArray arr = doc.to<JsonArray>();
   for (uint16_t i = 0; i < historicoRamTotal; i++) {
     JsonObject item = arr.add<JsonObject>();
@@ -735,14 +751,26 @@ void gravarHistoricoSePreciso() {
   }
   xSemaphoreGive(travaDados);
 
-  salvarJsonNoArquivo(ARQ_HISTORICO, doc);
+  bool gravou = salvarJsonNoArquivo(ARQ_HISTORICO, doc);
+
+  // Só considera "limpo" se a gravação deu certo E nenhum evento novo entrou
+  // enquanto o arquivo era escrito. Antes o flag caía antes da gravação, então
+  // uma falha de FS perdia os eventos daquela janela para sempre.
+  xSemaphoreTake(travaDados, portMAX_DELAY);
+  if (gravou && historicoSeqGerado == seqDaCopia) historicoSujo = false;
+  xSemaphoreGive(travaDados);
+
+  historicoUltimaGravacaoMs = millis();
+}
+
+// Chamado pelo loop: respeita a janela de 1,5 s.
+void gravarHistoricoSePreciso() {
+  gravarHistoricoInterno(false);
 }
 
 // Usado antes de reiniciar: não perde os últimos acessos da janela de 1,5 s.
 void gravarHistoricoAgora() {
-  if (!historicoSujo) return;
-  historicoUltimaGravacaoMs = millis() - 5000;
-  gravarHistoricoSePreciso();
+  gravarHistoricoInterno(true);
 }
 
 void inicializarArquivosDados() {
@@ -1440,24 +1468,37 @@ void rotaUltimoCartao() {
 
 void rotaObterLog() {
   if (!autenticarRequisicao()) return;
-  if (!historicoRam) return responderJson(200, "[]");
+  if (!fsPtr) return responderJson(200, "[]");
 
   // Serve do cache em RAM: nenhuma leitura de flash por poll do painel/página.
   JsonDocument doc;
   uint32_t agora = millis();
 
-  xSemaphoreTake(travaDados, portMAX_DELAY);
-  JsonArray arr = doc.to<JsonArray>();
-  for (uint16_t i = 0; i < historicoRamTotal; i++) {
-    JsonObject item = arr.add<JsonObject>();
-    item["uid"] = historicoRam[i].uid;
-    item["nome"] = historicoRam[i].nome;
-    item["res"] = historicoRam[i].res;
-    item["dh"] = historicoRam[i].dh;
-    item["tempo"] = historicoRam[i].tempo;
-    item["ha"] = (agora >= historicoRam[i].tempo) ? (agora - historicoRam[i].tempo) / 1000 : 0;
+  if (historicoRam) {
+    xSemaphoreTake(travaDados, portMAX_DELAY);
+    JsonArray arr = doc.to<JsonArray>();
+    for (uint16_t i = 0; i < historicoRamTotal; i++) {
+      JsonObject item = arr.add<JsonObject>();
+      item["uid"] = historicoRam[i].uid;
+      item["nome"] = historicoRam[i].nome;
+      item["res"] = historicoRam[i].res;
+      item["dh"] = historicoRam[i].dh;
+      item["tempo"] = historicoRam[i].tempo;
+      item["ha"] = (agora >= historicoRam[i].tempo) ? (agora - historicoRam[i].tempo) / 1000 : 0;
+    }
+    xSemaphoreGive(travaDados);
+  } else {
+    // Sem RAM (alocação falhou): mantém o comportamento antigo lendo a flash.
+    xSemaphoreTake(travaDados, portMAX_DELAY);
+    carregarJsonDoArquivo(ARQ_HISTORICO, doc);
+    xSemaphoreGive(travaDados);
+
+    JsonArray arr = doc.as<JsonArray>();
+    for (JsonObject item : arr) {
+      uint32_t tempo = item["tempo"].as<uint32_t>();
+      item["ha"] = (agora >= tempo) ? (agora - tempo) / 1000 : 0;
+    }
   }
-  xSemaphoreGive(travaDados);
 
   String s;
   serializeJson(doc, s);
@@ -1470,10 +1511,11 @@ void rotaLimparLog() {
 
   xSemaphoreTake(travaDados, portMAX_DELAY);
   if (historicoRam) historicoRamTotal = 0;
-  historicoSujo = false;
+  historicoSeqGerado++;
   JsonDocument doc;
   doc.to<JsonArray>();
-  salvarJsonNoArquivo(ARQ_HISTORICO, doc);
+  bool gravou = salvarJsonNoArquivo(ARQ_HISTORICO, doc);
+  historicoSujo = !gravou;
   xSemaphoreGive(travaDados);
   responderJson(200, "{\"ok\":true}");
 }
