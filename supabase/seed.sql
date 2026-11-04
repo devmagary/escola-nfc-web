@@ -19,10 +19,17 @@ VALUES
   ('05:6E:2F:A0', 'Felipe Duarte',       '2026006', '1º Ano A',  'Técnico em Informática',    'Sandra Duarte',   '(31) 99999-0006', false, 'Bloqueado por inadimplência até 15/03/2026.')
 ON CONFLICT (uid_nfc) DO NOTHING;
 
--- Histórico de exemplo com datas coerentes (rasa a fila do Realtime sem poluir).
+-- Histórico de exemplo com data coerente (alimenta a fila do Realtime sem
+-- poluir). O NOT EXISTS é o guard real: evita duplicar se alguém rodar o
+-- seed duas vezes à mão (o `db reset` sempre zera o banco antes).
 INSERT INTO public.historico_acessos
   (uid_nfc, aluno_id, nome_identificado, turma, tipo_evento, status, data_hora)
 SELECT a.uid_nfc, a.id, a.nome_completo, a.turma, 'ENTRADA', 'LIBERADO', now() - interval '1 day'
 FROM public.alunos a
 WHERE a.ativo = true
-ON CONFLICT (id) DO NOTHING;
+  AND NOT EXISTS (
+    SELECT 1 FROM public.historico_acessos h
+    WHERE h.aluno_id = a.id
+      AND h.data_hora >= now() - interval '1 day 1 hour'
+      AND h.data_hora <= now()
+  );
