@@ -236,6 +236,21 @@ Na versão **2.1.2-diag**, validar o cartão e consultar o histórico deixaram d
 
 Efeito prático: resposta mais rápida na portaria, menos desgaste da Flash e menos tempo com a trava de dados ocupada. Em **queda de energia**, os últimos ~1,5 s de histórico podem não ter sido gravados; em reinício normal nada se perde.
 
+### 5.5. Reconexão do leitor e watchdog (2.1.3)
+
+Sintoma corrigido: ao desconectar e reconectar o leitor (um fio ou todos), o módulo voltava a responder (LED azul respirando), mas **nenhum cartão era lido** até reiniciar a placa. A reconexão validava apenas `GetFirmwareVersion` e reabria o `Wire` sem fechá-lo; o `SAMConfig` (que arma o RF) podia falhar sem ser percebido, e o heartbeat — que só consulta a versão — mantinha o leitor marcado como saudável.
+
+Agora:
+
+* `reiniciarLeitorCompleto()` faz `Wire.end()` → wiggle de 9 clocks → `Wire.begin` → `nfc.begin` → versão com 3 tentativas → **`SAMConfig` com 3 tentativas e verificação**. Só considera o leitor saudável se versão **e** SAM passarem.
+* A reconexão automática (3 falhas de heartbeat) e o comando `reset_nfc` usam essa rotina.
+* **Watchdog:** sem nenhuma leitura por 15 min, repete a rotina (no máximo 1 vez a cada 10 min). Se não recuperar, o leitor fica marcado como ausente e o LED fica laranja.
+* `/api/status` e `/api/diagnostico` expõem `nfc_sam_ok`, `nfc_reinicios`, `nfc_reconexoes`, `nfc_ultima_leitura_s` e `nfc_ultimo_reinicio_s`.
+* Comandos novos: `reset_nfc` (reconecta sem reiniciar a placa) e `nfc_status` (resumo). Também disponíveis no card **Ferramentas** da página `/` e no `/console`.
+* A página inicial ganhou o card **Ferramentas e Diagnóstico** (console, Wi-Fi, OTA, painel, status/diagnóstico/histórico em JSON, backup e reinícios), com grade de 2 colunas no celular e alvos de toque ≥ 44 px.
+
+Teste de bancada: ler um cartão → desconectar o sensor → aguardar o LED laranja → reconectar → **ler novamente sem reiniciar**; repetir alternando um fio e todos. Conferir `nfc_reinicios` e `nfc_ultima_leitura_s` em `/api/status`.
+
 ---
 
 ## 6. Sincronização Híbrida com a Plataforma Escolar
