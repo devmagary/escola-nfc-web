@@ -70,7 +70,7 @@ Consulta rápida. Cada palavra em uma linha, na primeira vez.
 | `npm run lab:admin` | Recria o primeiro administrador |
 | `npm run lab:backup` | Gera `supabase/backup.sql` |
 
-**Atalho único** na área de trabalho (`Servidor NFC`, criado por `lab-criar-atalhos.cmd`): abre o menu de luzes com setas — dentro dele ficam ligar, desligar, checar, abrir painel, endereços, firewall, backup e zerar. Na pasta do projeto, `lab.cmd` faz o mesmo, e `lab-ligar.cmd`/`lab-desligar.cmd`/`lab-checar.cmd` continuam como atalhos de emergência.
+**Atalho único** na área de trabalho (`Servidor NFC`, criado por `lab-criar-atalhos.cmd`): abre o menu de luzes com setas — dentro dele ficam ligar, desligar, checar, abrir painel, endereços, firewall, backup, zerar e configurar este notebook. Na pasta do projeto, `lab.cmd` faz o mesmo, e `lab-ligar.cmd`/`lab-desligar.cmd`/`lab-checar.cmd` continuam como atalhos de emergência.
 
 Todos rodam na pasta do projeto, com o Docker aberto.
 

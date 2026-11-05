@@ -25,8 +25,9 @@ Itens do menu (setas + Enter, ou número + Enter):
 6. **Liberar o firewall** — pede a permissão de administrador e libera a rede da escola.
 7. **Fazer backup** — salva uma cópia dos dados na pasta do projeto.
 8. **Recomeçar do zero** — APAGA tudo (pede que você digite ZERAR para confirmar).
+9. **Configurar este notebook** — descobre o IP, grava as chaves no `.env.local` e mostra o endereço do painel (se a pilha estiver desligada, pergunta se quer subir para buscar as chaves).
 
-Aperte **ESC** para sair da tela; o que estiver ligado continua ligado.
+Aperte **ESC** para sair da tela (ou escolha **Sair**, o último item, sem número); o que estiver ligado continua ligado.
 
 Se preferir continuar na mão, o jeito tradicional de janelas está abaixo.
 

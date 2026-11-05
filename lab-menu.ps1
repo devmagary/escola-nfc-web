@@ -170,6 +170,17 @@ function Ver-Enderecos {
   Npm 'lab:ip'
 }
 
+function Configurar-Laboratorio {
+  param([switch]$Perguntar)
+  Write-Host ''
+  if ($Perguntar -and -not (Testar-Supabase)) {
+    $resposta = Read-Host '  A pilha está desligada. Subir agora para buscar as chaves? (S/N)'
+    if ($resposta -match '^[sS]') { Npm 'lab:start' }
+    else { Write-Host '  Vou ajustar só o IP; as chaves ficam para depois.' -ForegroundColor Yellow }
+  }
+  & node (Join-Path $script:Projeto 'scripts\lab-setup.mjs')
+}
+
 function Liberar-Firewall {
   Write-Host ''
   Write-Host '  Vai abrir uma janela pedindo permissão de administrador: clique em "Sim".' -ForegroundColor Yellow
@@ -226,6 +237,7 @@ $script:Opcoes = @(
   @{ Texto = 'Liberar o firewall da rede da escola';  Valor = 'firewall' }
   @{ Texto = 'Fazer backup dos dados';                Valor = 'backup' }
   @{ Texto = 'Recomeçar do zero (APAGA cadastros!)';  Valor = 'zerar' }
+  @{ Texto = 'Configurar este notebook (IP + chaves)'; Valor = 'configurar' }
   @{ Texto = 'Sair (deixa tudo como está)';           Valor = 'sair' }
 )
 
@@ -233,7 +245,7 @@ $script:Mensagens = New-Object System.Collections.Generic.List[string]
 $script:Largura = 70
 $script:LinhaLuzes = 3
 $script:LinhaMenu = 5
-$script:LinhaLog = 16
+$script:LinhaLog = 17
 $script:LogMax = 6
 
 function Pintar {
@@ -280,7 +292,11 @@ function Desenhar-Luzes {
 
 function Desenhar-MenuItem {
   param([int]$Indice, [bool]$Selecionado)
-  $texto = ('{0}) {1}' -f ($Indice + 1), $script:Opcoes[$Indice].Texto).PadRight($script:Largura)
+  $rotulo = $script:Opcoes[$Indice].Texto
+  if ($script:Opcoes[$Indice].Valor -ne 'sair') {
+    $rotulo = ('{0}) {1}' -f ($Indice + 1), $rotulo)
+  }
+  $texto = $rotulo.PadRight($script:Largura)
   $linha = $script:LinhaMenu + $Indice
   if ($Selecionado) {
     Pintar 3 $linha ('> ' + $texto) ([ConsoleColor]::Black) ([ConsoleColor]::Cyan)
@@ -312,10 +328,10 @@ function Desenhar-Quadro {
   Pintar 5 1 'ACESSO ESCOLAR NFC - LABORATORIO OFFLINE (sem internet)' ([ConsoleColor]::White)
   Pintar 2 2 $fina ([ConsoleColor]::Cyan)
   Pintar 2 4 $fina ([ConsoleColor]::Cyan)
-  Pintar 2 14 $fina ([ConsoleColor]::Cyan)
-  Pintar 4 15 'MENSAGENS:' ([ConsoleColor]::DarkCyan)
-  Pintar 2 22 $fina ([ConsoleColor]::Cyan)
-  Pintar 4 23 'Setas + Enter (ou números 1-9). ESC sai. Luzes atualizam sozinhas.' ([ConsoleColor]::DarkGray)
+  Pintar 2 15 $fina ([ConsoleColor]::Cyan)
+  Pintar 4 16 'MENSAGENS:' ([ConsoleColor]::DarkCyan)
+  Pintar 2 23 $fina ([ConsoleColor]::Cyan)
+  Pintar 4 24 'Setas + Enter (ou números 1-9). ESC sai. Luzes atualizam sozinhas.' ([ConsoleColor]::DarkGray)
   for ($i = 0; $i -lt $script:Opcoes.Count; $i++) { Desenhar-MenuItem -Indice $i -Selecionado $false }
   Desenhar-Luzes
   Repintar-Mensagens
@@ -396,6 +412,7 @@ function Rodar-TUI {
           'checar'    { Checar-Laboratorio;       Mensagem 'Checar: diagnóstico concluído; [OK] verde significa tudo bem.' }
           'abrir'     { Abrir-PainelNoNavegador;  Mensagem 'Abrir: navegador enviado ao painel.' }
           'enderecos' { Ver-Enderecos;            Mensagem 'Endereços: mostrados acima (digite no tablet).' }
+          'configurar' { Configurar-Laboratorio -Perguntar; Mensagem 'Configurar: IP e chaves atualizados no .env.local (veja o resumo acima).' }
           'firewall'  { Liberar-Firewall;         Mensagem 'Firewall: confirme com "Sim" na janela do Windows.' }
           'backup'    { Fazer-Backup;             Mensagem 'Backup: salvo em supabase\backup.sql.' }
           'zerar'     { Zerar-Laboratorio;        Mensagem 'Zerar: banco refeito com os 6 alunos de demonstração.' }
@@ -428,6 +445,7 @@ try {
       'desligar'  { Parar-Laboratorio }
       'checar'    { Checar-Laboratorio }
       'enderecos' { Ver-Enderecos }
+      'configurar' { Configurar-Laboratorio }
       'backup'    { Fazer-Backup }
       'zerar'     { Zerar-Laboratorio }
       default     { Write-Host ("Ação desconhecida: " + $Acao) -ForegroundColor Red }
