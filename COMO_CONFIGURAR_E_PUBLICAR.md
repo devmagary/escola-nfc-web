@@ -314,7 +314,7 @@ Ações disponíveis por usuário: **Editar** (nome, cargo e status), **Senha** 
 Na aba **Secretaria**:
 
 1. Preencha **nome completo** (mínimo 3 caracteres), **matrícula** (opcional, mas única), **turma** (obrigatória), **curso**, **responsável**, **WhatsApp** e o **UID do cartão NFC** (obrigatório, formato hexadecimal, ex.: `2C:9D:7E:8E`).
-2. A **foto é opcional**: escolha um arquivo JPG/PNG/WebP (até 10 MB, reduzida automaticamente) ou tire a foto pela webcam. Ela é gravada no bucket `fotos-alunos` e o caminho fica em `alunos.foto_path`. A webcam do navegador exige **HTTPS** (link da Vercel) ou **localhost**; em `http://192.168...` use o upload de arquivo.
+2. A **foto é opcional**: escolha um arquivo JPG/PNG/WebP (até 10 MB, reduzida automaticamente) ou use **📷 Tirar foto**. No computador (`localhost` ou HTTPS) o botão abre a **webcam do navegador**; no celular/tablet acessando `http://192.168...` (HTTP na rede) ele abre a **câmera nativa do aparelho** — fora de HTTPS/localhost o navegador não expõe a webcam. Em ambos os casos a foto é reduzida e gravada no bucket `fotos-alunos`, com o caminho em `alunos.foto_path`.
 3. Para preencher o UID direto do leitor, use **📡 Puxar do leitor** (precisa estar no modo local HTTP — seção 7).
 4. Marque **Permissão de acesso ativa** para liberar o cartão e clique em **Salvar Aluno**.
 
