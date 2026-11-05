@@ -290,3 +290,14 @@ export function mascararChave(valor) {
   if (texto.length <= 8) return '••••';
   return `${texto.slice(0, 4)}…${texto.slice(-4)}`;
 }
+
+// getUserMedia só existe em contexto seguro (HTTPS ou localhost). Em HTTP na
+// rede local (ex.: http://192.168.0.81:5500), o navegador esconde a API — nesse
+// caso o painel usa a câmera nativa do aparelho (input file com capture), que
+// não exige contexto seguro. Função pura para poder ser testada sem DOM.
+export function podeUsarWebcam(
+  mediaDevices = (typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined),
+  contextoSeguro = (typeof window !== 'undefined' ? Boolean(window.isSecureContext) : false),
+) {
+  return Boolean(contextoSeguro && mediaDevices && typeof mediaDevices.getUserMedia === 'function');
+}

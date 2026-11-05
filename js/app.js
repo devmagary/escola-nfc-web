@@ -9,7 +9,8 @@ import {
   $, escapeHtml, obterAvatarPadrao, normalizarUid, normalizarTelefone, normalizarTexto,
   formatarDataHora, formatarHora, formatarTelefone, telefoneParaWhatsapp, dataParaInput,
   inicioDoDiaISO, fimDoDiaISO, inicioDoDiaDeInput, fimDoDiaDeInput, debounce, gerarId,
-  formatarTamanho, baixarArquivo, paraCsv, parseCsv, mapearCabecalhoCsv, valorDoCsv, boolDoCsv
+  formatarTamanho, baixarArquivo, paraCsv, parseCsv, mapearCabecalhoCsv, valorDoCsv, boolDoCsv,
+  podeUsarWebcam
 } from './lib/utils.js';
 import * as Supabase from './services/supabase.js';
 import * as Esp32 from './services/esp32.js';
@@ -1561,12 +1562,22 @@ function processarArquivoFoto(evento) {
 }
 
 async function abrirCamera() {
-  const video = $('videoWebcam');
-  if (!video) return;
-  if (!navigator.mediaDevices?.getUserMedia) {
-    toast('Este navegador não oferece acesso à câmera. Use o upload de arquivo.', 'err');
+  // Em HTTPS/localhost o navegador expõe a webcam. Já em HTTP na rede local
+  // (celular acessando o IP do notebook/placa) o getUserMedia é escondido pelo
+  // navegador — aí abrimos a câmera nativa do aparelho pelo input com capture,
+  // que funciona sem contexto seguro e entrega a foto no mesmo fluxo.
+  if (!podeUsarWebcam()) {
+    const entrada = $('inputCameraFoto');
+    if (entrada) {
+      entrada.value = '';
+      entrada.click();
+      return;
+    }
+    toast('Para usar a webcam, abra pelo computador (localhost) ou use Escolher arquivo.', 'err');
     return;
   }
+  const video = $('videoWebcam');
+  if (!video) return;
   abrirModal('modalCamera');
   try {
     state.streamWebcam = await navigator.mediaDevices.getUserMedia({
@@ -2466,6 +2477,11 @@ function ligarEventos() {
   $('btnEscolherArquivo')?.addEventListener('click', () => $('inputArquivoFoto')?.click());
   $('inputArquivoFoto')?.addEventListener('change', processarArquivoFoto);
   $('btnTirarFoto')?.addEventListener('click', abrirCamera);
+  // Câmera nativa do aparelho (caminho quando a página está em HTTP na rede).
+  $('inputCameraFoto')?.addEventListener('change', processarArquivoFoto);
+  if ($('fotoInfo') && !podeUsarWebcam()) {
+    $('fotoInfo').textContent = 'A foto é opcional. No celular, "Tirar foto" abre a câmera do aparelho; JPG/PNG até 10 MB, reduzida automaticamente.';
+  }
   $('btnRemoverFoto')?.addEventListener('click', removerFotoSelecionada);
   $('formAluno')?.addEventListener('submit', salvarAluno);
   $('btnCancelarEdicao')?.addEventListener('click', limparFormularioAluno);
