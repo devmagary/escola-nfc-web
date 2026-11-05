@@ -174,6 +174,17 @@ a.link-painel:hover{background:#334155}
   /* Tablet/celular deitado: 2 colunas desde que haja largura */
   main{grid-template-columns:1fr 1fr}
 }
+/* Ferramentas: grade de atalhos, alvos de toque confortáveis */
+.menu-ferramentas{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:4px}
+.menu-ferramentas a,.menu-ferramentas button{display:flex;align-items:center;justify-content:center;gap:8px;min-height:46px;padding:10px 12px;border-radius:10px;border:1px solid var(--borda);background:#1e293b;color:var(--txt);text-decoration:none;font-size:.9rem;font-weight:500;text-align:center;cursor:pointer;line-height:1.25;white-space:normal;overflow-wrap:anywhere}
+.menu-ferramentas a:hover,.menu-ferramentas button:hover{background:#334155}
+.menu-ferramentas button.perigo{background:#7f1d1d;border-color:#b91c1c;color:#fff}
+.menu-ferramentas button.perigo:hover{background:#991b1b}
+@media(max-width:640px){
+  .menu-ferramentas{grid-template-columns:1fr 1fr;gap:8px}
+  .menu-ferramentas a,.menu-ferramentas button{min-height:54px;flex-direction:column;gap:4px;font-size:.78rem;padding:8px 6px}
+}
+@media(max-width:330px){.menu-ferramentas{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -191,6 +202,26 @@ a.link-painel:hover{background:#334155}
 </div>
 
 <main>
+  <!-- Ferramentas: centraliza console, wifi, OTA, APIs e recuperação do leitor -->
+  <section class="box full" aria-labelledby="tituloFerramentas">
+    <div class="topo">
+      <h2 id="tituloFerramentas">🧰 Ferramentas e Diagnóstico</h2>
+    </div>
+    <div class="menu-ferramentas">
+      <a href="/console">📟 Console</a>
+      <a href="/wifi">📶 Wi-Fi</a>
+      <a href="/ota">⬆️ Atualizar (OTA)</a>
+      <a href="/painel/">📊 Painel de Acesso</a>
+      <a href="/api/status" target="_blank" rel="noopener">📈 Status (JSON)</a>
+      <a href="/api/diagnostico" target="_blank" rel="noopener">🩺 Diagnóstico</a>
+      <a href="/api/log" target="_blank" rel="noopener">🕒 Histórico local</a>
+      <a href="/api/backup">💾 Backup dos cartões</a>
+      <button type="button" onclick="comandoNfc('reset_nfc')">🔄 Reiniciar leitor</button>
+      <button type="button" class="perigo" onclick="reiniciarPlaca()">⏻ Reiniciar placa</button>
+    </div>
+    <p class="sub" style="margin-top:10px">As rotas de histórico/backup pedem o login da placa (o navegador já está autenticado).</p>
+  </section>
+
   <!-- Card: Último Cartão Detectado -->
   <section class="box">
     <h2>📡 Última Leitura NFC</h2>
@@ -285,6 +316,28 @@ async function api(metodo, url, params, corpo) {
   try { j = await r.json(); } catch (e) {}
   if (!r.ok) throw new Error(j.erro || ('Erro HTTP ' + r.status));
   return j;
+}
+
+// Comandos do console (/api/comando) usados pelo menu de ferramentas.
+async function comandoNfc(cmd) {
+  try {
+    const r = await fetch('/api/comando', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'cmd=' + encodeURIComponent(cmd)
+    });
+    let j = {};
+    try { j = await r.json(); } catch (e) {}
+    toast(j.msg || (r.ok ? 'Comando enviado.' : 'Falha no comando.'), r.ok ? 'ok' : 'err');
+    if (cmd === 'reset_nfc' || cmd === 'reboot') setTimeout(render, 1200);
+  } catch (e) {
+    toast(msgErro(e), 'err');
+  }
+}
+
+function reiniciarPlaca() {
+  if (!confirm('Reiniciar a placa agora? A leitura NFC fica indisponível por alguns segundos.')) return;
+  comandoNfc('reboot');
 }
 
 function el(tag, txt, cls) {

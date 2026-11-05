@@ -90,7 +90,11 @@ input:focus{outline:2px solid var(--pri);border-color:transparent}
 <body>
 <header>
   <h1>📶 Configurar Wi-Fi</h1>
-  <a class="btn" href="/">← Voltar ao painel</a>
+  <div class="acoes">
+    <a class="btn" href="/">← Painel</a>
+    <a class="btn" href="/console">📟 Console</a>
+    <a class="btn" href="/ota">⬆️ OTA</a>
+  </div>
 </header>
 
 <main>
