@@ -104,7 +104,7 @@ export async function verificarLaboratorio(args = {}) {
   resultados.push({
     nome: 'Configuração (.env.local)',
     ok: Boolean(urlValida && anon && apontaParaLocal),
-    comoResolver: 'Copie .env.lab.example para .env.local e preencha com os valores de: npm run lab:status',
+    comoResolver: 'Rode: npm run lab:setup (detecta o IP e busca as chaves) ou copie .env.lab.example para .env.local',
   });
   if (urlValida && anon && apontaParaLocal) ok(`Configuração aponta para o Supabase local: ${url}`);
   else { falha(mensagemConfig); dica(resultados.at(-1).comoResolver); }

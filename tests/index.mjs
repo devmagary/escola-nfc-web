@@ -13,3 +13,4 @@ import './utils.test.mjs';
 import './bootstrap-admin.test.mjs';
 import './history.test.mjs';
 import './painel-build.test.mjs';
+import './lab-setup.test.mjs';
