@@ -28,3 +28,8 @@ yarn-debug.log*
 yarn-error.log*
 .DS_Store
 Thumbs.db
+
+# Artefatos locais do Playwright (screenshots/snapshots)
+/.playwright-cli/
+# Estado local do OpenChamber
+/.openchamber/
