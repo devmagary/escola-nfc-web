@@ -27,6 +27,7 @@ import {
   telefoneParaWhatsapp,
   uidValido,
   valorDoCsv,
+  podeUsarWebcam,
 } from '../js/lib/utils.js';
 
 import {
@@ -257,4 +258,21 @@ test('validarConfiguracao informa erros claros quando faltam dados', () => {
   });
   assert.equal(urlInvalida.valido, false);
   assert.match(urlInvalida.erros.join(' '), /URL http\/https válida/);
+});
+
+test('podeUsarWebcam exige contexto seguro e a API de mídia', () => {
+  const mediaDevices = { getUserMedia() {} };
+
+  // HTTPS ou localhost: o navegador entrega a API.
+  assert.equal(podeUsarWebcam(mediaDevices, true), true);
+
+  // HTTP na rede local (celular acessando o IP): a API é escondida.
+  assert.equal(podeUsarWebcam(mediaDevices, false), false);
+
+  // Sem a API, contexto seguro não basta.
+  assert.equal(podeUsarWebcam(undefined, true), false);
+  assert.equal(podeUsarWebcam({}, true), false);
+
+  // Sem contexto seguro, nem a API completa adianta.
+  assert.equal(podeUsarWebcam(mediaDevices), false);
 });
