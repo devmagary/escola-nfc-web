@@ -112,7 +112,13 @@ const char* ARQ_HISTORICO = "/historico.json";
 #define MAX_HISTORICO_LOG 50
 
 // Versão desta build de diagnóstico (aparece em /api/status e /api/diagnostico).
-#define FW_VERSAO "2.1.2-diag"
+#define FW_VERSAO "2.1.3"
+
+// Watchdog do leitor: sem nenhuma leitura por 15 min, tenta um reinício
+// completo (que também cobre corredor vazio, sem custo perceptível); no
+// máximo uma tentativa a cada 10 min para não ciclar.
+#define NFC_WATCHDOG_OCIOSO_MS    (15UL * 60UL * 1000UL)
+#define NFC_WATCHDOG_INTERVALO_MS (10UL * 60UL * 1000UL)
 
 // Limiares do diagnóstico de desempenho (ms). Eventos acima disso são
 // registrados no buffer circular e, com rate-limit, no console.
@@ -242,6 +248,16 @@ bool     modoAP = false;
 bool     ntpSincronizado = false;
 // Só o Core 0 (tarefa NFC) mexe neste contador.
 uint8_t  falhasHeartbeatNfc = 0;
+
+// Recuperação do leitor. O PN532 pode ficar "zumbi" após uma reconexão: responde
+// ao GetFirmwareVersion (LED azul normal) mas não lê cartão. Contadores e
+// pedidos usados pelo watchdog, pelo console e pelo /api/status.
+volatile bool pedidoReinicioNfc = false; // solicitado pelo Core 1 (console/página)
+uint32_t nfcReinicios = 0;               // reinícios completos executados
+uint32_t nfcReconexoes = 0;              // reconexões bem-sucedidas após queda
+uint32_t nfcUltimoReinicioMs = 0;
+uint32_t nfcUltimaLeituraMs = 0;
+bool     nfcSamOk = false;               // último SAMConfig (arma o RF)
 
 // Controle de cor temporária do LED RGB
 // volatile: o Core 0 (NFC) escreve e o Core 1 (loop/servidor) lê.
@@ -936,13 +952,68 @@ bool iniciarPN532(bool verboso) {
       Serial.println("1. Verifique se Chave 1=ON e Chave 2=OFF no modulo.");
       Serial.println("2. Verifique se SDA esta no pino 8 e SCL no pino 9.");
     }
+    nfcSamOk = false;
     return false;
   }
   if (verboso) {
     Serial.printf("PN532 Detectado! Firmware %d.%d\n", (versiondata >> 16) & 0xFF, (versiondata >> 8) & 0xFF);
   }
-  nfc.SAMConfig();
+  // O SAMConfig arma o campo de RF. Guardamos o resultado para o diagnóstico e
+  // para o reinício completo exigir versão + SAM (o boot continua aceitando só
+  // a versão, para não marcar como ausente um módulo que responde).
+  bool samOk = false;
+  for (uint8_t tentativa = 0; tentativa < 3 && !samOk; tentativa++) {
+    samOk = nfc.SAMConfig();
+    if (!samOk) delay(80);
+  }
+  nfcSamOk = samOk;
+  if (verboso && !samOk) {
+    Serial.println("Aviso: PN532 respondeu a versao, mas o SAMConfig falhou (RF pode nao armar).");
+  }
   return true;
+}
+
+// Reinício completo do leitor, replicando o que o boot faz. O caminho antigo
+// chamava Wire.begin() sem Wire.end() e aceitava o módulo apenas pela versão:
+// depois de reconectar o sensor ele podia responder ao GetFirmwareVersion mas
+// não ler cartão (estado "zumbi"). Aqui o barramento é fechado, recuperado e
+// reaberto; a versão é conferida com retries e o SAMConfig (que arma o RF)
+// precisa passar para o leitor ser considerado saudável.
+bool reiniciarLeitorCompleto(bool verboso) {
+  if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
+
+  Wire.end();
+  delay(30);
+  recuperarBarramentoI2C(); // wiggle de 9 clocks + Wire.begin + timeout
+
+  nfc.begin();              // Adafruit: RST (GPIO5, se ligado) + Wire.begin
+
+  bool versaoOk = false;
+  for (uint8_t tentativa = 0; tentativa < 3 && !versaoOk; tentativa++) {
+    if (nfc.getFirmwareVersion()) versaoOk = true;
+    else delay(150);
+  }
+
+  bool samOk = false;
+  if (versaoOk) {
+    for (uint8_t tentativa = 0; tentativa < 3 && !samOk; tentativa++) {
+      samOk = nfc.SAMConfig();
+      if (!samOk) delay(150);
+    }
+  }
+
+  nfcSamOk = samOk;
+  nfcUltimoReinicioMs = millis();
+  nfcReinicios++;
+  if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
+
+  if (verboso) {
+    Serial.printf("[NFC] reinicio completo: versao=%s sam=%s (total %lu)\n",
+                  versaoOk ? "ok" : "falhou",
+                  samOk ? "ok" : "falhou",
+                  (unsigned long)nfcReinicios);
+  }
+  return versaoOk && samOk;
 }
 
 void processarLeituraNfc(String uidFormatado) {
@@ -1113,10 +1184,23 @@ void tarefaNFC(void* parametro) {
   uint8_t uidBuffer[10];
   uint8_t uidLength = 0;
   uint32_t ultimoHeartbeatNfc = 0;
-  uint32_t ultimaLeituraOk = 0;
+  uint32_t ultimaLeituraOk = millis();
+  nfcUltimaLeituraMs = millis();
+  uint32_t ultimoWatchdogNfc = 0;
 
   for (;;) {
-    // 0. Pedidos de diagnóstico vindos do Core 1 (ping/varredura I2C)
+    // 0a. Reinício do leitor pedido pelo Core 1 (console/página, sem reboot).
+    if (pedidoReinicioNfc) {
+      pedidoReinicioNfc = false;
+      bool ok = reiniciarLeitorCompleto(true);
+      nfcOk = ok;
+      if (ok) {
+        falhasHeartbeatNfc = 0;
+      }
+      continue;
+    }
+
+    // 0b. Pedidos de diagnóstico vindos do Core 1 (ping/varredura I2C)
     if (pedidoNfcPendente != NFC_SEM_PEDIDO) {
       atenderPedidoNfc();
       continue;
@@ -1127,14 +1211,12 @@ void tarefaNFC(void* parametro) {
     // colidir com uma gravação na flash (que suspende os dois núcleos).
     if (!nfcOk) {
       vTaskDelay(pdMS_TO_TICKS(1500));
-      if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
-      recuperarBarramentoI2C();
-      bool reconectou = iniciarPN532(false);
-      if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
+      bool reconectou = reiniciarLeitorCompleto(true);
       if (reconectou) {
         nfcOk = true;
+        nfcReconexoes++;
         falhasHeartbeatNfc = 0;
-        Serial.println("\n[HARDWARE] Leitor NFC PN532 reconectado com sucesso!");
+        Serial.println("\n[HARDWARE] Leitor NFC PN532 reconectado (versao + SAM conferidos).");
       }
       continue;
     }
@@ -1163,6 +1245,22 @@ void tarefaNFC(void* parametro) {
       }
     }
 
+    // 2b. Watchdog de leitura: muito tempo sem nenhum cartão pode ser corredor
+    // vazio, mas também pode ser o estado "zumbi" (responde à versão e não lê).
+    // O reinício completo é barato (só I2C) e devolve o leitor sozinho; fica
+    // limitado a uma tentativa a cada 10 min.
+    if (agora - nfcUltimaLeituraMs > NFC_WATCHDOG_OCIOSO_MS &&
+        agora - ultimoWatchdogNfc > NFC_WATCHDOG_INTERVALO_MS) {
+      ultimoWatchdogNfc = agora;
+      bool recuperou = reiniciarLeitorCompleto(true);
+      if (!recuperou) {
+        nfcOk = false;
+        falhasHeartbeatNfc = 0;
+        Serial.println("[ALERTA] Watchdog nao conseguiu recuperar o PN532; LED laranja.");
+      }
+      continue;
+    }
+
     // 3. Leitura passiva com timeout curto (50ms), sem gravação de flash em voo.
     if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
     bool detectado = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uidBuffer, &uidLength, 50);
@@ -1170,6 +1268,7 @@ void tarefaNFC(void* parametro) {
 
     if (detectado && uidLength > 0 && uidLength <= 10) {
       ultimaLeituraOk = millis();
+      nfcUltimaLeituraMs = ultimaLeituraOk;
       ultimoHeartbeatNfc = ultimaLeituraOk; // Se leu cartão, o hardware está 100% responsivo
       falhasHeartbeatNfc = 0;
       String uidStr = uidBytesParaTexto(uidBuffer, uidLength);
@@ -1634,6 +1733,11 @@ void rotaStatusSistema() {
   doc["http_max_ms"] = diagHttpMaxMs;
   doc["nfc_max_ms"] = diagNfcMaxMs;
   doc["nfc_ultimo_ms"] = nfcUltimaDuracaoMs;
+  doc["nfc_sam_ok"] = nfcSamOk;
+  doc["nfc_reinicios"] = nfcReinicios;
+  doc["nfc_reconexoes"] = nfcReconexoes;
+  doc["nfc_ultima_leitura_s"] = nfcUltimaLeituraMs ? (millis() - nfcUltimaLeituraMs) / 1000 : 0;
+  doc["nfc_ultimo_reinicio_s"] = nfcUltimoReinicioMs ? (millis() - nfcUltimoReinicioMs) / 1000 : 0;
   doc["cartoes_ram"] = cartoesRamTotal;
   doc["historico_ram"] = historicoRamTotal;
   doc["historico_pendente"] = historicoSujo;
@@ -1654,6 +1758,9 @@ void rotaDiagnostico() {
   doc["versao"] = FW_VERSAO;
   doc["uptime_s"] = millis() / 1000;
   doc["nfc_ok"] = nfcOk;
+  doc["nfc_sam_ok"] = nfcSamOk;
+  doc["nfc_reinicios"] = nfcReinicios;
+  doc["nfc_reconexoes"] = nfcReconexoes;
   doc["rssi"] = WiFi.RSSI();
   doc["heap_livre"] = ESP.getFreeHeap();
   doc["heap_min"] = ESP.getMinFreeHeap();
@@ -2226,6 +2333,17 @@ void rotaComandoConsole() {
     logIndexInicio = 0;
     resposta = "Logs de memoria limpos.";
     logSerial(resposta, "wa");
+  } else if (cmd == "reset_nfc") {
+    // A tarefa NFC (Core 0) é a dona do I2C; aqui só levantamos a bandeira.
+    pedidoReinicioNfc = true;
+    resposta = "Reinicio do leitor NFC solicitado (atende em ate 1 s).";
+    logSerial("[NFC] " + resposta, "wa");
+  } else if (cmd == "nfc_status") {
+    resposta = String("NFC: ") + (nfcOk ? "ok" : "off") +
+               " | SAM: " + (nfcSamOk ? "ok" : "falhou") +
+               " | reinicios: " + String(nfcReinicios) +
+               " | reconexoes: " + String(nfcReconexoes);
+    logSerial(resposta, nfcOk ? "info" : "wa");
   } else if (cmd == "reboot") {
     logSerial("[SISTEMA] Reiniciando ESP32 por comando remoto...", "err");
     responderJson(200, "{\"ok\":true, \"msg\":\"Reiniciando placa em 1 segundo...\"}");
