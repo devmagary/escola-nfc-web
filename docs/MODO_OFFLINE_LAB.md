@@ -48,7 +48,7 @@ Este runbook é o procedimento operacional do laboratório **Acesso Escolar NFC*
 2. **Docker Desktop** instalado e rodando (`docker info` responde). Tutorial: [docs/docker-para-leigos/02-instalar-o-docker-desktop.md](docker-para-leigos/02-instalar-o-docker-desktop.md).
 3. **Configuração**: `Copy-Item .env.lab.example .env.local`.
 4. **Subir a pilha**: `npm run lab:start` (primeira vez demora; pull pode dar 429 e repetir sozinho).
-5. **Chaves**: `npm run lab:status` imprime `anon key` e `service_role key`; cole em `SUPABASE_ANON_KEY` e `SUPABASE_SERVICE_ROLE_KEY` no `.env.local`.
+5. **Chaves**: com a pilha ligada, `npm run lab:status` imprime linhas prontas `ANON_KEY="..."` e `SERVICE_ROLE_KEY="..."`; copie para `SUPABASE_ANON_KEY` e `SUPABASE_SERVICE_ROLE_KEY` no `.env.local`. (Com a pilha desligada o comando só devolve erro — rode `npm run lab:start` antes.)
 6. **Painel**: `npm run build` gera o `config.js` da raiz.
 7. **Firewall**: execute `lab-firewall-liberar.cmd` (pede elevação; libera 54321 e 5500 no perfil **privado**). Na janela do Windows, marque **Redes privadas**.
 8. **Verificação**: `npm run lab:check` (config, API, banco e chaves). `--ip` mostra os endereços para o tablet.
@@ -62,7 +62,7 @@ Este runbook é o procedimento operacional do laboratório **Acesso Escolar NFC*
 |---|---|
 | `npm run lab:start` | sobe o Supabase local (ou acorda a pilha parada) |
 | `npm run lab:stop` | para os containers **preservando os volumes/dados** |
-| `npm run lab:status` | estado, URLs e chaves locais |
+| `npm run lab:status` | mostra URLs e as linhas `ANON_KEY`/`SERVICE_ROLE_KEY` (exige a pilha ligada) |
 | `npm run lab:reset` | apaga o banco e reaplica migrations + seed |
 | `npm run lab:backup` | dump **data-only** em `supabase/backup.sql` |
 | `npm run lab:admin` | cria/garante o administrador do lab |

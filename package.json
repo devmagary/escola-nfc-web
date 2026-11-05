@@ -16,7 +16,7 @@
     "admin": "node scripts/bootstrap-admin.mjs",
     "lab:start": "npx --yes supabase@2.121.0 start",
     "lab:stop": "npx --yes supabase@2.121.0 stop",
-    "lab:status": "npx --yes supabase@2.121.0 status",
+    "lab:status": "npx --yes supabase@2.121.0 status -o env",
     "lab:reset": "npx --yes supabase@2.121.0 db reset",
     "lab:backup": "npx --yes supabase@2.121.0 db dump --data-only -f supabase/backup.sql",
     "lab:admin": "node scripts/bootstrap-admin.mjs",

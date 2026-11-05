@@ -62,7 +62,7 @@ Consulta rápida. Cada palavra em uma linha, na primeira vez.
 | `npm run lab:start` | Liga o Supabase local |
 | `npm run lab:dev` | Gera o `config.js` e liga o painel na 5500 |
 | `npm run lab:stop` | Para o Supabase; os dados ficam |
-| `npm run lab:status` | Mostra se o Supabase está no ar |
+| `npm run lab:status` | Mostra URLs e as chaves do laboratório (pilha precisa estar ligada) |
 | `npm run lab:ip` | Imprime os endereços |
 | `npm run lab:check` | Diagnóstico com dicas |
 | `npm run lab:reset` | Recria o banco com os 6 alunos de exemplo |
