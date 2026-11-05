@@ -21,6 +21,7 @@ Se terminar com "LABORATÓRIO PRONTO.", o laboratório está bom. O problema est
 | Login não entra | Admin não criado, config antiga, ou site errado | Rode `npm run lab:admin`; reabra o `lab:dev` (ele regenera o `config.js`); confira se a barra começa com `http://192.168.0.81:5500` e não com o endereço https da Vercel |
 | Banner "você está offline" no painel | O painel não encontrou a rede | Normal só quando realmente não há rede. Depois da instalação, o laboratório funciona sem internet |
 | A foto do aluno não aparece | `.env.local` aponta para `127.0.0.1` | Troque pelo IP real do notebook e reabra o `lab:dev` |
+| "Tirar foto" no celular mostrava erro de câmera | Página em HTTP na rede (fora de localhost) | **Já corrigido**: o botão abre a câmera nativa do aparelho. Se ainda aparecer o aviso antigo, atualize a página (recarregue); alternativa: **Escolher arquivo** |
 | A placa ESP32 não responde | Placa desligada, outra rede, endereço errado | Abra `http://192.168.0.73/api/status` no navegador do notebook; ajuste o endereço do leitor na aba Configurações |
 | O histórico não atualiza sozinho | A escuta em tempo real caiu | Aperte F5 e confira no Studio (`http://192.168.0.81:54323`) |
 | O notebook adormeceu e tudo parou | Suspensão do Windows derrubou os programas | Acorde o notebook e rode `npm run lab:start` de novo |
