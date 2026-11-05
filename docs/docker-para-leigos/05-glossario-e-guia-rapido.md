@@ -60,6 +60,7 @@ Consulta rápida. Cada palavra em uma linha, na primeira vez.
 | Comando | O que faz |
 |---|---|
 | `npm run lab:start` | Liga o Supabase local |
+| `npm run lab:setup` | Configura o laboratório sozinho (IP + chaves no `.env.local`) |
 | `npm run lab:dev` | Gera o `config.js` e liga o painel na 5500 |
 | `npm run lab:stop` | Para o Supabase; os dados ficam |
 | `npm run lab:status` | Mostra URLs e as chaves do laboratório (pilha precisa estar ligada) |

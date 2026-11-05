@@ -46,9 +46,9 @@ Este runbook é o procedimento operacional do laboratório **Acesso Escolar NFC*
 
 1. **Código**: em um clone do repositório, `git worktree add ..\escola-nfc-web-offline -b lab/offline`; ou copie a pasta do worktree inteira.
 2. **Docker Desktop** instalado e rodando (`docker info` responde). Tutorial: [docs/docker-para-leigos/02-instalar-o-docker-desktop.md](docker-para-leigos/02-instalar-o-docker-desktop.md).
-3. **Configuração**: `Copy-Item .env.lab.example .env.local`.
+3. **Configuração automática**: `npm run lab:setup` — descobre o IP, cria/atualiza o `.env.local` e (com a pilha ligada) preenche as chaves. `--esp http://IP-DA-PLACA` ajusta a placa; `--config` alinha os redirects do `config.toml`; `--start` sobe a pilha antes.
 4. **Subir a pilha**: `npm run lab:start` (primeira vez demora; pull pode dar 429 e repetir sozinho).
-5. **Chaves**: com a pilha ligada, `npm run lab:status` imprime linhas prontas `ANON_KEY="..."` e `SERVICE_ROLE_KEY="..."`; copie para `SUPABASE_ANON_KEY` e `SUPABASE_SERVICE_ROLE_KEY` no `.env.local`. (Com a pilha desligada o comando só devolve erro — rode `npm run lab:start` antes.)
+5. **Chaves**: se o setup rodou antes da pilha, rode `npm run lab:setup` de novo com a pilha ligada (ou `npm run lab:status` e copie `ANON_KEY`/`SERVICE_ROLE_KEY` para o `.env.local`).
 6. **Painel**: `npm run build` gera o `config.js` da raiz.
 7. **Firewall**: execute `lab-firewall-liberar.cmd` (pede elevação; libera 54321 e 5500 no perfil **privado**). Na janela do Windows, marque **Redes privadas**.
 8. **Verificação**: `npm run lab:check` (config, API, banco e chaves). `--ip` mostra os endereços para o tablet.
@@ -61,6 +61,7 @@ Este runbook é o procedimento operacional do laboratório **Acesso Escolar NFC*
 | Comando | O que faz |
 |---|---|
 | `npm run lab:start` | sobe o Supabase local (ou acorda a pilha parada) |
+| `npm run lab:setup` | descobre o IP, cria/atualiza o `.env.local` e preenche as chaves (`--start`, `--esp`, `--config`) |
 | `npm run lab:stop` | para os containers **preservando os volumes/dados** |
 | `npm run lab:status` | mostra URLs e as linhas `ANON_KEY`/`SERVICE_ROLE_KEY` (exige a pilha ligada) |
 | `npm run lab:reset` | apaga o banco e reaplica migrations + seed |
