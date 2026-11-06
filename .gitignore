@@ -30,6 +30,6 @@ yarn-error.log*
 Thumbs.db
 
 # Artefatos locais do Playwright (screenshots/snapshots)
-/.playwright-cli/
+.playwright-cli/
 # Estado local do OpenChamber
 /.openchamber/
