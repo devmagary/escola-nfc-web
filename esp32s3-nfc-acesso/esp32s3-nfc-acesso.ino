@@ -192,6 +192,7 @@ String  painelUploadErro = "";
 size_t  painelUploadBytes = 0;
 bool    painelUploadAutorizado = false;
 bool    painelUploadFalhou = false;
+bool    otaUploadAutorizado = false;
 
 // Sincronização entre Cores (Core 0 para NFC, Core 1 para Web)
 SemaphoreHandle_t  travaDados;
@@ -199,6 +200,9 @@ SemaphoreHandle_t  travaLog = nullptr;
 SemaphoreHandle_t  travaDiag = nullptr;
 // Protege o "último cartão" (Strings escritas no Core 0 e lidas pelo Core 1).
 SemaphoreHandle_t  travaUltimo = nullptr;
+// Protege o estado textual do cadastro biométrico (Strings escritas no Core 0
+// e lidas/alteradas pelas rotas HTTP no Core 1).
+SemaphoreHandle_t  travaBio = nullptr;
 // Evita que uma gravação na SPI flash comece no meio de uma transação I2C do
 // PN532: gravar na flash desliga o cache para os DOIS núcleos, e a transação
 // interrompida podia deixar o módulo sem responder até o próximo reset.
@@ -260,6 +264,38 @@ volatile uint16_t bioCadastroId = 0;
 String            bioCadastroEtapa = "inativo";
 String            bioCadastroMsg = "";
 uint32_t          bioCadastroInicioMs = 0;
+
+// Exclusão de modelo biométrico: a UART1 pertence à tarefa NFC (Core 0), então
+// a rota HTTP apenas enfileira o pedido e aguarda o resultado publicado.
+volatile bool     bioExcluirPendente = false;
+volatile bool     bioExcluirPronto = false;
+volatile uint16_t bioExcluirId = 0;
+volatile int      bioExcluirResultado = -1;
+
+// Copia/define o estado textual do cadastro sob travaBio (Strings não são
+// seguras para escrita e leitura simultâneas em núcleos diferentes).
+void bioDefinirEtapa(const String& etapa, const String& msg) {
+  if (travaBio) xSemaphoreTake(travaBio, portMAX_DELAY);
+  bioCadastroEtapa = etapa;
+  bioCadastroMsg = msg;
+  if (travaBio) xSemaphoreGive(travaBio);
+}
+
+String bioEtapaAtual() {
+  String etapa;
+  if (travaBio) xSemaphoreTake(travaBio, portMAX_DELAY);
+  etapa = bioCadastroEtapa;
+  if (travaBio) xSemaphoreGive(travaBio);
+  return etapa;
+}
+
+void bioCopiarEstado(String& etapa, String& msg) {
+  if (travaBio) xSemaphoreTake(travaBio, portMAX_DELAY);
+  etapa = bioCadastroEtapa;
+  msg = bioCadastroMsg;
+  if (travaBio) xSemaphoreGive(travaBio);
+}
+
 bool     modoAP = false;
 bool     ntpSincronizado = false;
 // Só o Core 0 (tarefa NFC) mexe neste contador.
@@ -768,7 +804,11 @@ void adicionarHistoricoRam(const String& uid, const String& nome, uint8_t res) {
 
   uint16_t total = historicoRamTotal;
   if (total < MAX_HISTORICO_LOG) total++;
-  for (int i = (int)total - 1; i > 0; i--) historicoRam[i] = historicoRam[i - 1];
+  // Desloca o bloco de uma vez (memmove trata a sobreposição; o loop copiava
+  // struct por struct a cada leitura de cartão/digital).
+  if (total > 1) {
+    memmove(&historicoRam[1], &historicoRam[0], (size_t)(total - 1) * sizeof(HistoricoRam));
+  }
 
   HistoricoRam& h = historicoRam[0];
   strlcpy(h.uid, uid.c_str(), sizeof(h.uid));
@@ -1423,49 +1463,46 @@ void processarCicloBiometria(uint32_t& ultimoVistoBioMs) {
   if (bioCadastroAtivo) {
     if (millis() - bioCadastroInicioMs > 30000) {
       bioCadastroAtivo = false;
-      bioCadastroEtapa = "erro";
-      bioCadastroMsg = "Tempo esgotado (30s) para encostar o dedo no sensor.";
+      bioDefinirEtapa("erro", "Tempo esgotado (30s) para encostar o dedo no sensor.");
       acionarLedFeedback(255, 0, 0, 1500);
       return;
     }
 
-    if (bioCadastroEtapa == "aguardando_dedo_1") {
+    String etapaCadastro = bioEtapaAtual();
+    if (etapaCadastro == "aguardando_dedo_1") {
       if (bioCapturarImagem() == 0x00) {
         if (bioImagemParaTz(1) == 0x00) {
-          bioCadastroEtapa = "remova_dedo";
-          bioCadastroMsg = "1a leitura capturada! Retire o dedo do sensor...";
+          bioDefinirEtapa("remova_dedo", "1a leitura capturada! Retire o dedo do sensor...");
           acionarLedFeedback(0, 140, 255, 800);
         } else {
-          bioCadastroMsg = "Imagem borrada. Tente encostar o dedo novamente...";
+          bioDefinirEtapa("aguardando_dedo_1", "Imagem borrada. Tente encostar o dedo novamente...");
         }
       }
       return;
     }
 
-    if (bioCadastroEtapa == "remova_dedo") {
+    if (etapaCadastro == "remova_dedo") {
       if (bioCapturarImagem() == 0x02) { // 0x02 = sem dedo no sensor
-        bioCadastroEtapa = "aguardando_dedo_2";
-        bioCadastroMsg = "Encoste o MESMO dedo novamente para confirmar (2a leitura)...";
+        bioDefinirEtapa("aguardando_dedo_2", "Encoste o MESMO dedo novamente para confirmar (2a leitura)...");
       }
       return;
     }
 
-    if (bioCadastroEtapa == "aguardando_dedo_2") {
+    if (etapaCadastro == "aguardando_dedo_2") {
       if (bioCapturarImagem() == 0x00) {
+        uint16_t idGravado = bioCadastroId;
         if (bioImagemParaTz(2) == 0x00 &&
             bioCriarModelo() == 0x00 &&
-            bioSalvarModelo(bioCadastroId) == 0x00) {
+            bioSalvarModelo(idGravado) == 0x00) {
           bioCadastroAtivo = false;
-          bioCadastroEtapa = "concluido";
-          bioCadastroMsg = "Biometria gravada com sucesso na posicao #" + String(bioCadastroId) + "!";
+          bioDefinirEtapa("concluido", "Biometria gravada com sucesso na posicao #" + String(idGravado) + "!");
           acionarLedFeedback(0, 255, 0, 1800);
-          logSerial("[BIO] Digital gravada na posicao #" + String(bioCadastroId), "ok");
+          logSerial("[BIO] Digital gravada na posicao #" + String(idGravado), "ok");
         } else {
           bioCadastroAtivo = false;
-          bioCadastroEtapa = "erro";
-          bioCadastroMsg = "As duas leituras nao coincidiram. Tente novamente.";
+          bioDefinirEtapa("erro", "As duas leituras nao coincidiram. Tente novamente.");
           acionarLedFeedback(255, 0, 0, 1800);
-          logSerial("[BIO] Falha ao combinar digitais na posicao #" + String(bioCadastroId), "err");
+          logSerial("[BIO] Falha ao combinar digitais na posicao #" + String(idGravado), "err");
         }
       }
       return;
@@ -1509,6 +1546,7 @@ void tarefaNFC(void* parametro) {
   nfcUltimaLeituraMs = millis();
   uint32_t ultimoWatchdogNfc = 0;
   uint32_t ultimoVistoBioMs = 0;
+  uint32_t ultimaTentativaBioMs = 0;
 
   for (;;) {
     // 0a. Reinício do leitor pedido pelo Core 1 (console/página, sem reboot).
@@ -1528,6 +1566,17 @@ void tarefaNFC(void* parametro) {
       continue;
     }
 
+    // 0c. Exclusão de modelo biométrico pedida pelo Core 1. A UART1 pertence a
+    // esta tarefa; a rota HTTP apenas enfileira e recebe o resultado, evitando
+    // dois pacotes intercalados no mesmo fio (antes o Core 1 escrevia direto).
+    if (bioExcluirPendente) {
+      uint16_t idExcluir = bioExcluirId;
+      bioExcluirResultado = bioOk ? bioExcluirModelo(idExcluir) : -1;
+      bioExcluirPronto = true;
+      bioExcluirPendente = false;
+      continue;
+    }
+
     // 1. Se o módulo estiver desconectado, tenta reconectar periodicamente.
     // A recuperação do barramento + reset do módulo rodam sob a trava para não
     // colidir com uma gravação na flash (que suspende os dois núcleos).
@@ -1544,6 +1593,17 @@ void tarefaNFC(void* parametro) {
         bioOk = iniciarBiometria(false);
       }
       continue;
+    }
+
+    // Sensor biométrico ausente no boot: tenta reconectar a cada 10 s mesmo
+    // com o NFC saudável (antes a biometria só era tentada quando os dois
+    // leitores estavam fora, então um cabo solto no AS608 ficava sem retry).
+    if (nfcOk && !bioOk && millis() - ultimaTentativaBioMs >= 10000) {
+      ultimaTentativaBioMs = millis();
+      if (iniciarBiometria(false)) {
+        bioOk = true;
+        logSerial("[BIO] Sensor biometrico reconectado na UART1.", "ok");
+      }
     }
 
     uint32_t agora = millis();
@@ -1659,10 +1719,24 @@ void rotaListarCartoes() {
   if (!autenticarRequisicao()) return;
   if (!fsPtr) return responderErro(500, "Memória Flash não montada.");
 
-  xSemaphoreTake(travaDados, portMAX_DELAY);
   JsonDocument doc;
-  carregarJsonDoArquivo(ARQ_CARTOES, doc);
+  xSemaphoreTake(travaDados, portMAX_DELAY);
+  if (cartoesRamValido && cartoesRam) {
+    // Lista direto do índice em PSRAM: o painel consulta esta rota com
+    // frequência e não precisa reler/desserializar a Flash a cada poll.
+    JsonArray arr = doc.to<JsonArray>();
+    for (uint16_t i = 0; i < cartoesRamTotal; i++) {
+      JsonObject item = arr.add<JsonObject>();
+      item["uid"] = cartoesRam[i].uid;
+      item["nome"] = cartoesRam[i].nome;
+      item["ativo"] = cartoesRam[i].ativo;
+      if (cartoesRam[i].bio_id > 0) item["bio_id"] = cartoesRam[i].bio_id;
+    }
+  } else {
+    carregarJsonDoArquivo(ARQ_CARTOES, doc);
+  }
   xSemaphoreGive(travaDados);
+
   String saida;
   serializeJson(doc, saida);
   responderJson(200, saida);
@@ -1838,15 +1912,19 @@ void rotaSincronizarAluno() {
   String uid = "";
   String nome = "";
   bool ativo = true;
+  uint16_t bioId = 0;
 
+  // Uma única desserialização: o corpo JSON é lido uma vez e reaproveitado
+  // tanto no update quanto na inserção (antes o parse era repetido até 3x).
   if (server.hasArg("plain")) {
     JsonDocument body;
     if (deserializeJson(body, server.arg("plain")) == DeserializationError::Ok) {
       uid = normalizarUid(body["uid"].as<String>());
       nome = body["nome"].as<String>();
       ativo = body["ativo"].as<bool>();
-      uint16_t bId = body["bio_id"] | 0;
-      if (bId >= 1 && bId <= 300) server.sendHeader("X-Bio-Id", String(bId));
+      bioId = (uint16_t)(body["bio_id"] | 0);
+      if (bioId >= 1 && bioId <= 300) server.sendHeader("X-Bio-Id", String(bioId));
+      else bioId = 0;
     }
   }
 
@@ -1870,7 +1948,7 @@ void rotaSincronizarAluno() {
     if (c["uid"].as<String>().equalsIgnoreCase(uid)) {
       c["ativo"] = ativo;
       if (!nome.isEmpty()) c["nome"] = nome;
-      if (server.hasArg("plain")) { JsonDocument b; if (deserializeJson(b, server.arg("plain")) == DeserializationError::Ok && (b["bio_id"] | 0) > 0) c["bio_id"] = (uint16_t)(b["bio_id"] | 0); }
+      if (bioId > 0) c["bio_id"] = bioId;
       achou = true;
       break;
     }
@@ -1881,7 +1959,7 @@ void rotaSincronizarAluno() {
     novo["uid"] = uid;
     novo["nome"] = nome.isEmpty() ? "Aluno" : nome;
     novo["ativo"] = ativo;
-    if (server.hasArg("plain")) { JsonDocument b; if (deserializeJson(b, server.arg("plain")) == DeserializationError::Ok && (b["bio_id"] | 0) > 0) novo["bio_id"] = (uint16_t)(b["bio_id"] | 0); }
+    if (bioId > 0) novo["bio_id"] = bioId;
   }
 
   salvarJsonNoArquivo(ARQ_CARTOES, doc);
@@ -2723,6 +2801,13 @@ void rotaOtaFinalizar() {
 void rotaOtaUpload() {
   HTTPUpload& upload = server.upload();
   if (upload.status == UPLOAD_FILE_START) {
+    // O corpo multipart é recebido antes da rota final; sem checar aqui, um
+    // POST sem login gravaria firmware mesmo com a página /ota protegida.
+    otaUploadAutorizado = server.authenticate(ADMIN_USUARIO, ADMIN_SENHA);
+    if (!otaUploadAutorizado) {
+      logSerial("[OTA] Upload recusado: credenciais ausentes ou invalidas.", "err");
+      return;
+    }
     logSerial("[OTA] Iniciando gravacao de firmware: " + upload.filename, "wa");
     uint32_t maxSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
     if (!Update.begin(maxSpace, U_FLASH)) {
@@ -2730,7 +2815,11 @@ void rotaOtaUpload() {
       logSerial("[OTA] Erro no Update.begin: " + String(Update.errorString()), "err");
     }
   } else if (upload.status == UPLOAD_FILE_WRITE) {
-    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+    if (!otaUploadAutorizado) return;
+    if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
+    size_t gravou = Update.write(upload.buf, upload.currentSize);
+    if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
+    if (gravou != upload.currentSize) {
       Update.printError(Serial);
       logSerial("[OTA] Erro no Update.write", "err");
     }
@@ -2739,7 +2828,11 @@ void rotaOtaUpload() {
     static uint32_t blocosOta = 0;
     if ((++blocosOta & 0x1F) == 0) delay(1);
   } else if (upload.status == UPLOAD_FILE_END) {
-    if (Update.end(true)) {
+    if (!otaUploadAutorizado) return;
+    if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
+    bool ok = Update.end(true);
+    if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
+    if (ok) {
       logSerial("[OTA] Gravacao concluida com sucesso! " + String(upload.totalSize) + " bytes.", "ok");
     } else {
       Update.printError(Serial);
@@ -2903,8 +2996,10 @@ void rotaUploadPainelArquivo() {
 
     garantirPastasPainel();
     painelUploadCaminho = destino + ".tmp";
+    if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
     if (fsPtr->exists(painelUploadCaminho.c_str())) fsPtr->remove(painelUploadCaminho.c_str());
     painelUploadArquivo = fsPtr->open(painelUploadCaminho.c_str(), "w");
+    if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
     if (!painelUploadArquivo) {
       painelUploadFalhou = true;
       painelUploadErro = "falha ao criar arquivo temporario";
@@ -2915,22 +3010,33 @@ void rotaUploadPainelArquivo() {
     if (painelUploadBytes + upload.currentSize > PAINEL_MAX_ARQUIVO) {
       painelUploadFalhou = true;
       painelUploadErro = "arquivo maior que 512 KB";
+      if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
       if (painelUploadArquivo) painelUploadArquivo.close();
       if (fsPtr && fsPtr->exists(painelUploadCaminho.c_str())) fsPtr->remove(painelUploadCaminho.c_str());
+      if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
       return;
     }
 
-    if (!painelUploadArquivo ||
-        painelUploadArquivo.write(upload.buf, upload.currentSize) != upload.currentSize) {
+    // Gravar na flash desliga o cache dos dois núcleos: sem a trava, a escrita
+    // pode cair no meio de uma transação I2C do PN532 (Core 0).
+    if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
+    bool gravouBloco = painelUploadArquivo &&
+                       painelUploadArquivo.write(upload.buf, upload.currentSize) == upload.currentSize;
+    if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
+
+    if (!gravouBloco) {
       painelUploadFalhou = true;
       painelUploadErro = "falha ao gravar na Flash";
+      if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
       if (painelUploadArquivo) painelUploadArquivo.close();
       if (fsPtr && fsPtr->exists(painelUploadCaminho.c_str())) fsPtr->remove(painelUploadCaminho.c_str());
+      if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
       return;
     }
     painelUploadBytes += upload.currentSize;
   } else if (upload.status == UPLOAD_FILE_END) {
     if (!painelUploadAutorizado) return;
+    if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
     if (painelUploadArquivo) painelUploadArquivo.close();
 
     if (!painelUploadFalhou && !painelUploadCaminho.isEmpty()) {
@@ -2942,11 +3048,14 @@ void rotaUploadPainelArquivo() {
         painelUploadErro = "falha ao renomear o arquivo";
       }
     }
+    if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
   } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
     if (painelUploadArquivo) painelUploadArquivo.close();
     if (fsPtr && !painelUploadCaminho.isEmpty() && fsPtr->exists(painelUploadCaminho.c_str())) {
       fsPtr->remove(painelUploadCaminho.c_str());
     }
+    if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
     painelUploadFalhou = true;
     painelUploadErro = "upload abortado";
   }
@@ -2965,30 +3074,34 @@ void rotaBioIniciar() {
   if (id < 1 || id > 300) return responderErro(400, "Posicao de biometria invalida (use 1 a 300).");
 
   bioCadastroId = id;
-  bioCadastroEtapa = "aguardando_dedo_1";
-  bioCadastroMsg = "Posicao #" + String(id) + ": encoste o dedo no sensor optico (1a leitura)...";
   bioCadastroInicioMs = millis();
   bioCadastroAtivo = true;
+  String msgInicio = "Posicao #" + String(id) + ": encoste o dedo no sensor optico (1a leitura)...";
+  bioDefinirEtapa("aguardando_dedo_1", msgInicio);
 
   JsonDocument resp;
   resp["ok"] = true;
   resp["id"] = id;
-  resp["etapa"] = bioCadastroEtapa;
-  resp["mensagem"] = bioCadastroMsg;
+  resp["etapa"] = bioEtapaAtual();
+  resp["mensagem"] = msgInicio;
   String s;
   serializeJson(resp, s);
   responderJson(200, s);
 }
 
 void rotaBioStatus() {
+  String etapa, msg;
+  bioCopiarEstado(etapa, msg);
+  uint16_t id = bioCadastroId;
+
   JsonDocument resp;
   resp["ok"] = true;
   resp["ativo"] = bioCadastroAtivo;
-  resp["id"] = bioCadastroId;
-  resp["etapa"] = bioCadastroEtapa;
-  resp["mensagem"] = bioCadastroMsg;
-  if (bioCadastroEtapa == "concluido" && bioCadastroId >= 1) {
-    resp["uid_virtual"] = gerarUidVirtualBio(bioCadastroId);
+  resp["id"] = id;
+  resp["etapa"] = etapa;
+  resp["mensagem"] = msg;
+  if (etapa == "concluido" && id >= 1) {
+    resp["uid_virtual"] = gerarUidVirtualBio(id);
   }
   String s;
   serializeJson(resp, s);
@@ -2997,8 +3110,7 @@ void rotaBioStatus() {
 
 void rotaBioCancelar() {
   bioCadastroAtivo = false;
-  bioCadastroEtapa = "inativo";
-  bioCadastroMsg = "Cadastro cancelado.";
+  bioDefinirEtapa("inativo", "Cadastro cancelado.");
   responderJson(200, "{\"ok\":true,\"cancelado\":true}");
 }
 
@@ -3014,11 +3126,24 @@ void rotaBioExcluir() {
   if (id == 0 && server.hasArg("id")) id = server.arg("id").toInt();
   if (id < 1 || id > 300) return responderErro(400, "Posicao de biometria invalida (use 1 a 300).");
 
-  int rc = bioExcluirModelo(id);
+  // A UART1 é da tarefa NFC (Core 0): enfileira o pedido e aguarda o resultado
+  // em vez de escrever no mesmo fio enquanto a leitura passiva acontece.
+  bioExcluirId = id;
+  bioExcluirResultado = -1;
+  bioExcluirPronto = false;
+  bioExcluirPendente = true;
+
+  uint32_t esperaInicio = millis();
+  while (!bioExcluirPronto && (millis() - esperaInicio) < 1500) delay(10);
+
+  int rc = bioExcluirPronto ? bioExcluirResultado : -2;
+  if (!bioExcluirPronto) bioExcluirPendente = false;
+
   JsonDocument resp;
   resp["ok"] = (rc == 0x00);
   resp["id"] = id;
   resp["removido"] = (rc == 0x00);
+  if (rc == -2) resp["erro"] = "A tarefa NFC nao concluiu a exclusao em 1,5 s.";
   String s;
   serializeJson(resp, s);
   responderJson(200, s);
@@ -3191,6 +3316,7 @@ void setup() {
 
   travaDados = xSemaphoreCreateMutex();
   travaUltimo = xSemaphoreCreateMutex();
+  travaBio = xSemaphoreCreateMutex();
   travaResultadoNfc = xSemaphoreCreateMutex();
   travaNfcFlash = xSemaphoreCreateMutex();
 

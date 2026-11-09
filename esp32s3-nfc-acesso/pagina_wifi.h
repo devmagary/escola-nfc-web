@@ -81,8 +81,15 @@ input:focus{outline:2px solid var(--pri);border-color:transparent}
   main{padding-top:12px;gap:12px}
   .box{padding:14px;border-radius:12px}
   header{padding-top:calc(10px + var(--safe-t));padding-bottom:10px}
-  .redes{max-height:none}
+  /* Mantém a lista curta: o formulário de senha precisa continuar alcançável */
+  .redes{max-height:42vh}
+  .topo{flex-direction:column;align-items:stretch}
+  .topo .acoes{width:100%;justify-content:space-between}
   .row button{flex:1 1 100%}
+}
+@media(max-width:380px){
+  header .acoes{width:100%}
+  header .acoes .btn{flex:1 1 0;justify-content:center;font-size:.78rem;padding:8px 6px}
 }
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
@@ -252,7 +259,11 @@ function selecionarRede(botao, ssid) {
   for (const b of $('redes').querySelectorAll('button.rede')) b.classList.remove('selecionada');
   botao.classList.add('selecionada');
   $('ssid').value = ssid;
-  $('senha').focus();
+  // No celular a lista pode ocupar boa parte da tela: leva o campo de senha
+  // para o centro em vez de deixar o usuario rolar procurando.
+  const campoSenha = $('senha');
+  campoSenha.focus({ preventScroll: true });
+  if (campoSenha.scrollIntoView) campoSenha.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 async function escanear(forcar) {

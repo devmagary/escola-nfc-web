@@ -26,7 +26,9 @@ h2{font-size:1rem;margin:0 0 12px;color:#cbd5e1;display:flex;align-items:center;
 main{max-width:1120px;margin:0 auto;padding:20px calc(20px + var(--safe-r)) calc(20px + var(--safe-b)) calc(20px + var(--safe-l));display:grid;gap:18px;grid-template-columns:1fr 1fr}
 .box{background:var(--card);border:1px solid var(--borda);border-radius:14px;padding:18px;box-shadow:0 4px 16px rgba(0,0,0,.3);min-width:0}
 .full{grid-column:1/-1}
-@supports (grid-template-columns:subgrid){@media(min-width:981px){main{grid-template-rows:auto auto 1fr;align-items:start}main>.box{grid-row:span 2;display:grid;grid-template-rows:subgrid;align-content:start}}}
+/* (O alinhamento por subgrid foi removido: com a seção de ferramentas em largura
+   total, os cards seguintes herdavam linhas erradas e o conteúdo se sobrepunha
+   no desktop. O fluxo normal do grid mantém cada card legível.) */
 label{display:block;font-size:.82rem;color:var(--sub);margin:10px 0 4px}
 input[type=text],input[type=search]{width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--borda);background:#0a0f1d;color:var(--txt);font-size:.95rem}
 input[type=text],input[type=search]{font-size:16px}
@@ -41,12 +43,14 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px}
 .topo{display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:space-between;margin-bottom:12px;}
 .topo h2{margin:0}
+.busca-campo{min-width:0}
 .acoes-topo{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .acoes-topo input[type=search]{width:240px}
 table{width:100%;border-collapse:collapse;font-size:.9rem}
 th,td{text-align:left;padding:10px;border-bottom:1px solid var(--borda)}
 th{color:var(--sub);font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.5px}
 .tag{padding:3px 9px;border-radius:999px;font-size:.75rem;font-weight:600;white-space:nowrap}
+.bio-badge{display:inline-flex;align-items:center;gap:3px;margin-left:6px;padding:2px 7px;border-radius:999px;background:#312e81;color:#c7d2fe;font-size:.7rem;font-weight:600;vertical-align:middle;white-space:nowrap}
 .on{background:#064e3b;color:#6ee7b7}.off{background:#7f1d1d;color:#fca5a5}.wa{background:#78350f;color:#fcd34d}
 .ultimo{font-size:clamp(1.4rem,1.1rem + 2vw,2rem);margin:6px 0;font-weight:bold;color:#60a5fa;overflow-wrap:anywhere}
 .sub{color:var(--sub);font-size:.85rem}
@@ -73,7 +77,7 @@ a.link-painel:hover{background:#334155}
   main{grid-template-columns:1fr;padding:14px calc(14px + var(--safe-r)) calc(18px + var(--safe-b)) calc(14px + var(--safe-l));gap:14px}
   .row{margin-top:0}
   .topo h2{width:100%}
-  .acoes-topo{width:100%;flex-wrap:nowrap}
+  .acoes-topo{width:100%;flex-wrap:wrap}
   .acoes-topo input[type=search]{flex:1 1 100%;width:100%;max-width:none}
   .acoes-topo button{flex:1 1 0;min-width:0}
   .row button{flex:1 1 auto}
@@ -90,8 +94,12 @@ a.link-painel:hover{background:#334155}
   .chip{font-size:.74rem;padding:4px 9px;min-height:28px;display:inline-flex;align-items:center;max-width:100%;overflow-wrap:anywhere}
   #toast{left:calc(50% + (var(--safe-l) - var(--safe-r))/2);bottom:calc(16px + var(--safe-b));width:auto;max-width:min(92vw,480px)}
   .busca-campo{width:100%}
-  .topo{padding-top:38px;position:relative}
-  .topo .busca-campo{position:absolute;left:0;right:0;top:0}
+  /* Topo em coluna natural: titulo, busca e botoes nunca se sobrepoem */
+  .topo{flex-direction:column;align-items:stretch;gap:8px;padding-top:0;position:static;margin-bottom:10px}
+  .topo h2{width:auto}
+  .topo .busca-campo{position:static;left:auto;right:auto;top:auto;order:1}
+  .acoes-topo{width:100%;flex-wrap:wrap;order:2}
+  .acoes-topo button{flex:1 1 0;min-width:0}
   .row button{flex:1 1 100%}
   .switch{padding:10px 0;margin-top:8px}
   .switch input{width:20px;height:20px}
@@ -102,35 +110,35 @@ a.link-painel:hover{background:#334155}
 @media(max-width:720px){
   .tab-cartoes .tab-scroll,.tab-cartoes table,.tab-cartoes tbody{display:block;width:100%}
   .tab-cartoes thead{display:none}
-  .tab-cartoes tr{display:block;position:relative;padding:9px 11px 10px;margin-bottom:8px;border:1px solid var(--borda);border-radius:10px;background:#0e1626}
+  /* Grid em vez de float: nome e UID longos não atropelam o selo de status */
+  .tab-cartoes tr{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:10px;align-items:start;padding:10px 12px;margin-bottom:8px;border:1px solid var(--borda);border-radius:10px;background:#0e1626}
   .tab-cartoes tr:last-child{margin-bottom:0}
-  .tab-cartoes td{display:block;border:0;padding:0;text-align:left}
-  .tab-cartoes td:nth-child(1){font-weight:600;padding-right:92px;min-height:22px;line-height:1.35;overflow-wrap:anywhere}
-  .tab-cartoes td:nth-child(2){color:var(--sub);font-size:.82rem;margin:4px 0 8px;overflow-wrap:anywhere}
-  .tab-cartoes td:nth-child(3){float:right;margin-top:-30px;clear:none}
-  .tab-cartoes td.acoes{float:none;white-space:normal;display:flex;gap:6px;margin-top:0;padding-top:8px;border-top:1px dashed var(--borda)}
+  .tab-cartoes td{display:block;border:0;padding:0;text-align:left;min-width:0}
+  .tab-cartoes td:nth-child(1){grid-column:1;grid-row:1;font-weight:600;line-height:1.35;overflow-wrap:anywhere}
+  .tab-cartoes td:nth-child(2){grid-column:1;grid-row:2;color:var(--sub);font-size:.82rem;margin-top:4px;overflow-wrap:anywhere}
+  .tab-cartoes td:nth-child(3){grid-column:2;grid-row:1;justify-self:end}
+  .tab-cartoes td.acoes{grid-column:1/-1;grid-row:3;display:flex;gap:6px;margin-top:10px;padding-top:9px;border-top:1px dashed var(--borda)}
   .tab-cartoes td.acoes button{flex:1 1 auto;min-width:0;margin:0!important;padding:6px 4px;font-size:.78rem}
   .tab-cartoes tr.vazio-lista{display:block}
-  .tab-cartoes tr.vazio-lista td{float:none;padding:16px 6px;margin:0;text-align:center;min-height:0}
+  .tab-cartoes tr.vazio-lista td{display:block;padding:16px 6px;margin:0;text-align:center}
 }
 
 /* Histórico em cards */
 @media(max-width:720px){
   .tab-log .tab-scroll,.tab-log table,.tab-log tbody{display:block;width:100%}
   .tab-log thead{display:none}
-  .tab-log tr{display:block;padding:9px 12px;border-left:3px solid var(--borda);border-radius:8px;background:#0e1626;margin-bottom:8px}
+  .tab-log tr{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:10px;row-gap:2px;padding:9px 12px;border-left:3px solid var(--borda);border-radius:8px;background:#0e1626;margin-bottom:8px}
   .tab-log tr:last-child{margin-bottom:0}
-  .tab-log td{display:block;border:0;padding:0;text-align:left}
-  .tab-log td:nth-child(1){font-size:.85rem;font-weight:600;margin-bottom:2px;display:inline-block}
+  .tab-log td{display:block;border:0;padding:0;text-align:left;min-width:0}
+  .tab-log td:nth-child(1){grid-column:1;grid-row:1;font-size:.85rem;font-weight:600;overflow-wrap:anywhere}
   .tab-log td:nth-child(1):empty{display:none}
-  .tab-log td:nth-child(1),.tab-log td:nth-child(2){white-space:nowrap}
-  .tab-log td:nth-child(2){display:inline-block;float:right;font-size:.8rem;color:var(--sub);margin-left:8px}
-  .tab-log td:nth-child(3){display:inline-block;margin-left:8px;font-size:.88rem}
-  .tab-log td:nth-child(4){float:right;clear:both;margin-top:2px}
+  .tab-log td:nth-child(2){grid-column:2;grid-row:1;justify-self:end;font-size:.8rem;color:var(--sub);overflow-wrap:anywhere}
+  .tab-log td:nth-child(3){grid-column:1;grid-row:2;font-size:.88rem;overflow-wrap:anywhere}
+  .tab-log td:nth-child(4){grid-column:2;grid-row:2;justify-self:end}
   .tab-log tr:has(.on){border-left-color:var(--ok)}
   .tab-log tr:has(.off){border-left-color:var(--err)}
   .tab-log tr:has(.wa){border-left-color:var(--wa)}
-  .tab-log tr:has(.vazio){border:0;padding:0}
+  .tab-log tr:has(.vazio){display:block;border:0;padding:0}
   .tab-log td.vazio{text-align:center;padding:16px 0}
 }
 
@@ -138,8 +146,11 @@ a.link-painel:hover{background:#334155}
 @media(max-height:500px) and (orientation:landscape){
   header{padding-top:calc(7px + var(--safe-t));padding-bottom:7px;flex-direction:row;flex-wrap:nowrap;gap:10px}
   header h1{flex:0 0 auto;white-space:nowrap;font-size:.82rem}
-  #status{flex:1 1 0;min-width:0;justify-content:flex-end;padding-left:6px}
+  #status{flex:1 1 0;min-width:0;justify-content:flex-start;padding-left:6px;overflow-x:auto;scrollbar-width:none}
+  #status::-webkit-scrollbar{display:none}
   #status .chip{min-height:0!important;padding:1px 6px!important;font-size:.68rem!important;line-height:1.25;border-radius:6px}
+  /* Em tela baixa, os chips menos essenciais saem para o essencial caber */
+  #status .chip-extra{display:none}
   .chips{flex:0 1 auto;min-width:0;flex-wrap:nowrap;justify-content:flex-end;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
   .chips::-webkit-scrollbar{display:none}
   .chip{white-space:nowrap}
@@ -147,8 +158,10 @@ a.link-painel:hover{background:#334155}
   .box{padding:12px 14px}
   .row{margin-top:8px}
   .topo{margin-bottom:8px}
-  .busca-campo{display:none}
-  .topo{padding-top:0}
+  /* Busca continua acessível no celular deitado, apenas mais compacta */
+  .busca-campo{display:block}
+  .topo .busca-campo{position:static}
+  .acoes-topo input[type=search]{width:180px}
 }
 
 /* Celular deitado (paisagem): lista completa e densa, sem cards empilhados */
@@ -156,14 +169,15 @@ a.link-painel:hover{background:#334155}
   .tab-cartoes table{display:table;width:100%}
   .tab-cartoes thead{display:table-header-group}
   .tab-cartoes tbody{display:table-row-group}
-  .tab-cartoes tr{display:table-row;padding:0;margin:0;border:0;background:none}
-  .tab-cartoes td{display:table-cell;padding:6px 8px;border-bottom:1px solid var(--borda);vertical-align:middle}
+  .tab-cartoes tr{display:table-row;padding:0;margin:0;border:0;background:none;grid-template-columns:none;column-gap:0}
+  .tab-cartoes td{display:table-cell;padding:6px 8px;border-bottom:1px solid var(--borda);vertical-align:middle;grid-column:auto;grid-row:auto}
   .tab-cartoes td:nth-child(1),.tab-cartoes td:nth-child(2){padding-right:8px;margin:0;min-height:0;color:var(--txt);font-size:.85rem}
-  .tab-cartoes td:nth-child(3){float:none;margin:0;text-align:center}
-  .tab-cartoes td.acoes{display:table-cell;border-top:0;padding-top:6px;text-align:right;white-space:nowrap}
+  .tab-cartoes td:nth-child(3){text-align:center;justify-self:auto}
+  .tab-cartoes td.acoes{display:table-cell;border-top:0;padding-top:6px;margin-top:0;text-align:right;white-space:nowrap}
   .tab-cartoes td.acoes button{flex:none;min-height:30px;padding:4px 8px;margin-left:4px!important}
+  .tab-cartoes tr.vazio-lista{display:table-row}
   .tab-cartoes tr.vazio-lista td{display:table-cell}
-  .tab-log tr{padding:7px 10px}
+  .tab-log tr{display:block;padding:7px 10px}
   .tab-log td:nth-child(3){margin-left:6px}
   .tab-cartoes tr,.tab-log tr{margin-bottom:6px}
   .tab-cartoes td.acoes{padding-top:6px;margin-top:0}
@@ -224,9 +238,9 @@ a.link-painel:hover{background:#334155}
 
   <!-- Card: Último Cartão Detectado -->
   <section class="box">
-    <h2>📡 Última Leitura NFC</h2>
+    <h2>📡 Última Leitura (NFC / Biometria)</h2>
     <div id="ultUid" class="ultimo mono">—</div>
-    <div id="ultInfo" class="sub">Aproxime uma tag ou cartão do leitor PN532</div>
+    <div id="ultInfo" class="sub">Aproxime uma tag/cartão ou use o sensor de biometria</div>
     <div class="row">
       <button id="btnUsar" disabled onclick="usarUltimo()">Cadastrar este cartão</button>
       <button class="sec" id="btnAguardar" onclick="aguardar()">Aguardar aproximação</button>
@@ -380,7 +394,10 @@ function render() {
 
   for (const c of vis) {
     const tr = el('tr');
-    tr.append(el('td', c.nome), el('td', c.uid, 'mono'));
+    tr.append(el('td', c.nome));
+    const tdUid = el('td', c.uid, 'mono');
+    if (c.bio_id) tdUid.append(el('span', '👆 Bio #' + c.bio_id, 'bio-badge'));
+    tr.append(tdUid);
     const st = el('td');
     st.append(el('span', c.ativo ? 'Autorizado' : 'Bloqueado', 'tag ' + (c.ativo ? 'on' : 'off')));
     tr.append(st);
@@ -494,11 +511,14 @@ async function atualizarUltimo() {
     ultimo = u;
     if (!u.seq) {
       $('ultUid').textContent = '—';
-      $('ultInfo').textContent = 'Aproxime uma tag ou cartão do leitor';
+      $('ultInfo').textContent = 'Aproxime uma tag/cartão ou use o sensor de biometria';
       $('btnUsar').disabled = true;
     } else {
       $('ultUid').textContent = u.uid;
-      $('ultInfo').textContent = (u.cadastrado ? 'Cadastrado: ' + u.nome : 'Não cadastrado') + ' · ' + ha(u.ha);
+      const metodo = u.metodo === 'biometria'
+        ? '👆 Biometria' + (u.bio_id ? ' #' + u.bio_id : '')
+        : '📡 NFC';
+      $('ultInfo').textContent = metodo + ' · ' + (u.cadastrado ? 'Cadastrado: ' + u.nome : 'Não cadastrado') + ' · ' + ha(u.ha);
       $('btnUsar').disabled = false;
       $('btnUsar').textContent = u.cadastrado ? 'Editar este cartão' : 'Cadastrar este cartão';
       if (novo) {
@@ -552,8 +572,9 @@ async function atualizarStatus() {
       el('span', info.modo === 'AP' ? '📶 Rede AP: ' + info.ssid : '📶 ' + info.ssid + ' (' + info.rssi + ' dBm)', 'chip'),
       el('span', '🌐 ' + info.ip, 'chip'),
       el('span', info.nfc ? '🟢 NFC PN532 OK' : '🔴 NFC Desconectado', 'chip'),
-      el('span', '🧠 PSRAM: ' + info.psram + 'MB', 'chip'),
-      el('span', '🕒 ' + (info.hora || ('Uptime ' + duracao(info.uptime))), 'chip')
+      el('span', info.bio ? '👆 Biometria OK' : '⚪ Biometria Off', 'chip'),
+      el('span', '🧠 PSRAM: ' + info.psram + 'MB', 'chip chip-extra'),
+      el('span', '🕒 ' + (info.hora || ('Uptime ' + duracao(info.uptime))), 'chip chip-extra')
     );
     $('faixaWifi').hidden = info.modo !== 'AP';
     render();

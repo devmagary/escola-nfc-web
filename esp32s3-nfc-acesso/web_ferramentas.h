@@ -72,8 +72,9 @@ button:disabled{opacity:0.5;cursor:not-allowed}
   .chips{width:auto;flex:1 1 auto;flex-wrap:nowrap;justify-content:flex-end;overflow-x:auto;scrollbar-width:none}
   .chips::-webkit-scrollbar{display:none}
   .nav-link{min-height:34px;font-size:.72rem;display:inline-flex;align-items:center}
-  .toolbar{padding-top:5px;padding-bottom:5px}
-  .toolbar button{min-height:34px;padding:5px 10px}
+  .toolbar{padding-top:5px;padding-bottom:5px;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+  .toolbar::-webkit-scrollbar{display:none}
+  .toolbar button{min-height:34px;padding:5px 10px;white-space:nowrap}
   .linha-log{flex-direction:row;gap:8px;border-bottom:0}
   .log-hora{min-width:62px}
   .barra-status{padding-top:4px;padding-bottom:calc(4px + var(--safe-b))}
@@ -96,6 +97,7 @@ button:disabled{opacity:0.5;cursor:not-allowed}
   <div class="chips">
     <span class="chip" id="chipUptime">Uptime: 0s</span>
     <span class="chip" id="chipNfc">NFC: ...</span>
+    <span class="chip" id="chipBio">Bio: ...</span>
     <a href="/wifi" class="nav-link">📶 Wi-Fi</a>
     <a href="/ota" class="nav-link">⬆️ OTA</a>
     <a href="/" class="nav-link">🏠 Painel</a>
@@ -145,6 +147,15 @@ function limparTela() {
   terminal.innerHTML = '';
 }
 
+// Mantém o DOM do terminal com um teto de linhas: sem isto, horas de console
+// aberto no celular acumulam milhares de nós e o navegador trava.
+const MAX_LINHAS_DOM = 250;
+function limitarLinhas() {
+  while (terminal.childElementCount > MAX_LINHAS_DOM) {
+    terminal.removeChild(terminal.firstElementChild);
+  }
+}
+
 function escaparHtml(t) {
   return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
@@ -171,6 +182,10 @@ async function buscarNovosLogs() {
       document.getElementById('chipNfc').textContent = dados.nfc ? 'NFC: OK' : 'NFC: Desconectado';
       document.getElementById('chipNfc').style.color = dados.nfc ? '#10b981' : '#f87171';
     }
+    if (dados.bio !== undefined) {
+      document.getElementById('chipBio').textContent = dados.bio ? 'Bio: OK' : 'Bio: Off';
+      document.getElementById('chipBio').style.color = dados.bio ? '#10b981' : '#64748b';
+    }
 
     if (dados.logs && dados.logs.length > 0) {
       dados.logs.forEach(l => {
@@ -192,6 +207,7 @@ async function buscarNovosLogs() {
       });
 
       document.getElementById('txtTotalLogs').textContent = totalRecebidos + ' linhas';
+      limitarLinhas();
 
       if (autoScroll) {
         terminal.scrollTop = terminal.scrollHeight;
@@ -215,6 +231,7 @@ async function enviarComando(cmd) {
       l.className = 'linha-log';
       l.innerHTML = '<span class="log-hora">SISTEMA</span><span class="log-msg log-wa">>>> ' + escaparHtml(res.msg) + '</span>';
       terminal.appendChild(l);
+      limitarLinhas();
       terminal.scrollTop = terminal.scrollHeight;
     }
   } catch (e) {
@@ -264,8 +281,8 @@ button:disabled{opacity:0.5;cursor:not-allowed}
 .alerta{margin-top:16px;padding:10px;border-radius:8px;font-size:0.8rem;text-align:center;display:none;overflow-wrap:anywhere}
 .alerta.ok{background:rgba(16,185,129,0.15);color:var(--ok);border:1px solid rgba(16,185,129,0.3);display:block}
 .alerta.err{background:rgba(239,68,68,0.15);color:var(--err);border:1px solid rgba(239,68,68,0.3);display:block}
-.links{margin-top:20px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:0.8rem}
-.links a{color:#38bdf8;text-decoration:none;padding:10px 8px;border-radius:8px;background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.22);flex:1 1 auto;text-align:center;min-width:0;touch-action:manipulation}
+.links{margin-top:20px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;font-size:0.8rem}
+.links a{color:#38bdf8;text-decoration:none;padding:10px 8px;border-radius:8px;background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.22);text-align:center;min-width:0;line-height:1.2;touch-action:manipulation;display:flex;align-items:center;justify-content:center}
 .links a:hover{background:rgba(56,189,248,0.16)}
 
 /* Celular em pe: tela cheia sem cartao flutuante, e area de toque maior */
@@ -275,7 +292,8 @@ button:disabled{opacity:0.5;cursor:not-allowed}
   .icone{font-size:2.2rem;margin-bottom:4px}
   .topo{margin-bottom:14px}
   .zona-arquivo{padding:20px 14px;margin:14px 0}
-  .links a{flex:1 1 100%}
+  .links{gap:6px;font-size:.72rem}
+  .links a{padding:9px 4px}
 }
 /* Celular deitado: layout em duas colunas (arquivo a esquerda, status a direita) */
 @media(max-height:520px) and (orientation:landscape){
