@@ -94,6 +94,12 @@ const char* HOSTNAME = "nfc";
 #define PN532_IRQ   2
 #define PN532_RESET 5
 
+// Sensor Biométrico Óptico AS608 / FPM10A / DY50 via UART1 (Opcional / Híbrido)
+// Pino 1 (VCC) -> 3.3V | Pino 2 (TX) -> GPIO 18 | Pino 3 (RX) -> GPIO 17 | Pino 4 (GND) -> GND
+#define BIO_RX_PIN  18
+#define BIO_TX_PIN  17
+#define BIO_BAUD    57600
+
 // LED RGB WS2812B integrado na placa YD-ESP32-S3
 #define PINO_LED_RGB 48
 
@@ -244,6 +250,16 @@ uint32_t ultimoLidoMs = 0;
 uint32_t ultimoVistoMs = 0;
 
 bool     nfcOk = false;
+bool     bioOk = false;
+String   ultimoMetodoLido = "nfc";
+uint16_t ultimoBioIdLido = 0;
+
+// Máquina de estados para cadastro de biometria (Core 0 <-> API HTTP Core 1)
+volatile bool     bioCadastroAtivo = false;
+volatile uint16_t bioCadastroId = 0;
+String            bioCadastroEtapa = "inativo";
+String            bioCadastroMsg = "";
+uint32_t          bioCadastroInicioMs = 0;
 bool     modoAP = false;
 bool     ntpSincronizado = false;
 // Só o Core 0 (tarefa NFC) mexe neste contador.
@@ -311,7 +327,7 @@ void atualizarLedStatus() {
   }
 
   // 2. Alerta de Falha Crítica de Hardware: Leitor NFC Desconectado ou sem comunicação
-  if (!nfcOk) {
+  if (!nfcOk && !bioOk) {
     // Alerta estroboscópico âmbar/laranja de alta visibilidade (2 piscadas rápidas por segundo)
     uint32_t t = agora % 1000;
     if (t < 130 || (t > 240 && t < 370)) {
@@ -622,9 +638,10 @@ bool carregarJsonDoArquivo(const char* caminho, JsonDocument& doc) {
 // =====================================================================
 
 struct CartaoRam {
-  char uid[40];   // UID de 10 bytes formatado ("AA:..:JJ") ocupa 29 caracteres
-  char nome[128];
-  bool ativo;
+  char     uid[40];   // UID de 10 bytes formatado ("AA:..:JJ") ocupa 29 caracteres
+  char     nome[128];
+  bool     ativo;
+  uint16_t bio_id;
 };
 
 struct HistoricoRam {
@@ -681,6 +698,7 @@ bool indiceDoDocumento(JsonDocument& doc) {
     strlcpy(item.uid, c["uid"].as<String>().c_str(), sizeof(item.uid));
     strlcpy(item.nome, c["nome"].as<String>().c_str(), sizeof(item.nome));
     item.ativo = c["ativo"].as<bool>();
+    item.bio_id = c["bio_id"] | 0;
   }
   cartoesRamValido = true;
   return true;
@@ -1022,6 +1040,8 @@ void processarLeituraNfc(String uidFormatado) {
   // O "último cartão" é lido pelo Core 1 (/api/ultimo): Strings exigem trava.
   xSemaphoreTake(travaUltimo, portMAX_DELAY);
   ultimoUidLido = uidFormatado;
+  ultimoMetodoLido = "nfc";
+  ultimoBioIdLido = 0;
   ultimoLidoMs = millis();
   ultimoSeq++;
   xSemaphoreGive(travaUltimo);
@@ -1178,6 +1198,307 @@ void atenderPedidoNfc() {
   logSerial(resposta, ok ? "ok" : "err");
 }
 
+// =====================================================================
+// Driver Nativo UART para Sensor Biométrico Óptico AS608 / FPM10A / DY50
+// (Sem dependência de bibliotecas externas — protocolo Synochip padrão)
+// =====================================================================
+
+String gerarUidVirtualBio(uint16_t id) {
+  char buf[16];
+  snprintf(buf, sizeof(buf), "FB:10:%02X:%02X", (id >> 8) & 0xFF, id & 0xFF);
+  return String(buf);
+}
+
+int bioEnviarComando(const uint8_t* payload, uint16_t len, uint8_t* respPayload, uint16_t* respLen, uint32_t timeoutMs = 450) {
+  while (Serial1.available()) Serial1.read();
+
+  uint16_t pktLen = len + 2;
+  uint16_t soma = 0x01 + ((pktLen >> 8) & 0xFF) + (pktLen & 0xFF);
+
+  uint8_t cabecalho[9] = {
+    0xEF, 0x01,
+    0xFF, 0xFF, 0xFF, 0xFF,
+    0x01,
+    (uint8_t)((pktLen >> 8) & 0xFF),
+    (uint8_t)(pktLen & 0xFF)
+  };
+  Serial1.write(cabecalho, sizeof(cabecalho));
+  for (uint16_t i = 0; i < len; i++) {
+    Serial1.write(payload[i]);
+    soma += payload[i];
+  }
+  Serial1.write((uint8_t)((soma >> 8) & 0xFF));
+  Serial1.write((uint8_t)(soma & 0xFF));
+  Serial1.flush();
+
+  uint8_t rx[64];
+  uint16_t idx = 0;
+  uint16_t esperado = 9;
+  uint32_t t0 = millis();
+
+  while (millis() - t0 < timeoutMs) {
+    while (Serial1.available()) {
+      uint8_t b = (uint8_t)Serial1.read();
+      if (idx == 0 && b != 0xEF) continue;
+      if (idx == 1 && b != 0x01) { idx = 0; continue; }
+      if (idx < sizeof(rx)) rx[idx++] = b;
+      if (idx == 9) {
+        uint16_t rLen = ((uint16_t)rx[7] << 8) | rx[8];
+        esperado = 9 + rLen;
+        if (esperado > sizeof(rx)) esperado = sizeof(rx);
+      }
+      if (idx >= esperado && idx >= 12) {
+        if (rx[6] != 0x07) return -2; // Não é pacote ACK
+        uint16_t dadosLen = esperado - 11;
+        if (respPayload && respLen) {
+          uint16_t copiar = (dadosLen > *respLen) ? *respLen : dadosLen;
+          if (copiar > 1) memcpy(respPayload, &rx[10], copiar - 1);
+          *respLen = (copiar > 0) ? (copiar - 1) : 0;
+        }
+        return rx[9]; // Código de confirmação (0x00 = OK)
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+  return -1; // Timeout
+}
+
+bool iniciarBiometria(bool verboso) {
+  Serial1.begin(BIO_BAUD, SERIAL_8N1, BIO_RX_PIN, BIO_TX_PIN);
+  delay(40);
+  uint8_t cmdVfy[5] = { 0x13, 0x00, 0x00, 0x00, 0x00 };
+  uint8_t resp[8];
+  uint16_t rLen = sizeof(resp);
+  int rc = bioEnviarComando(cmdVfy, sizeof(cmdVfy), resp, &rLen, 250);
+  if (rc == 0x00) {
+    if (verboso) {
+      Serial.printf("Sensor Biometrico AS608/FPM10A Detectado na UART1 (RX=%d, TX=%d)!\n", BIO_RX_PIN, BIO_TX_PIN);
+    }
+    return true;
+  }
+  if (verboso) {
+    Serial.printf("[BIO] Sensor biometrico ausente nos pinos RX=%d / TX=%d (modo somente NFC ativo).\n", BIO_RX_PIN, BIO_TX_PIN);
+  }
+  return false;
+}
+
+int bioCapturarImagem() {
+  uint8_t cmd[1] = { 0x01 };
+  uint8_t resp[4];
+  uint16_t rLen = sizeof(resp);
+  return bioEnviarComando(cmd, 1, resp, &rLen, 350);
+}
+
+int bioImagemParaTz(uint8_t slot) {
+  uint8_t cmd[2] = { 0x02, slot };
+  uint8_t resp[4];
+  uint16_t rLen = sizeof(resp);
+  return bioEnviarComando(cmd, 2, resp, &rLen, 400);
+}
+
+int bioCriarModelo() {
+  uint8_t cmd[1] = { 0x05 };
+  uint8_t resp[4];
+  uint16_t rLen = sizeof(resp);
+  return bioEnviarComando(cmd, 1, resp, &rLen, 450);
+}
+
+int bioSalvarModelo(uint16_t id) {
+  uint8_t cmd[4] = { 0x06, 0x01, (uint8_t)((id >> 8) & 0xFF), (uint8_t)(id & 0xFF) };
+  uint8_t resp[4];
+  uint16_t rLen = sizeof(resp);
+  return bioEnviarComando(cmd, 4, resp, &rLen, 500);
+}
+
+int bioExcluirModelo(uint16_t id) {
+  uint8_t cmd[5] = { 0x0C, (uint8_t)((id >> 8) & 0xFF), (uint8_t)(id & 0xFF), 0x00, 0x01 };
+  uint8_t resp[4];
+  uint16_t rLen = sizeof(resp);
+  return bioEnviarComando(cmd, 5, resp, &rLen, 450);
+}
+
+int bioBuscarDigital(uint16_t* idEncontrado, uint16_t* score) {
+  uint8_t cmd[6] = { 0x04, 0x01, 0x00, 0x00, 0x01, 0x2C }; // páginas 0..300
+  uint8_t resp[8] = {0};
+  uint16_t rLen = sizeof(resp);
+  int rc = bioEnviarComando(cmd, 6, resp, &rLen, 500);
+  if (rc == 0x00 && rLen >= 4) {
+    *idEncontrado = ((uint16_t)resp[0] << 8) | resp[1];
+    *score = ((uint16_t)resp[2] << 8) | resp[3];
+  }
+  return rc;
+}
+
+void processarLeituraBiometria(uint16_t bioId) {
+  uint32_t inicioUs = micros();
+
+  String uidVirtual = gerarUidVirtualBio(bioId);
+  String uidResolvido = uidVirtual;
+  bool encontrado = false;
+  bool ativo = false;
+  String nome = "";
+
+  uint32_t inicioBuscaUs = micros();
+
+  xSemaphoreTake(travaDados, portMAX_DELAY);
+  if (cartoesRamValido && cartoesRam) {
+    for (uint16_t i = 0; i < cartoesRamTotal; i++) {
+      if (cartoesRam[i].bio_id == bioId || strcasecmp(cartoesRam[i].uid, uidVirtual.c_str()) == 0) {
+        encontrado = true;
+        ativo = cartoesRam[i].ativo;
+        nome = cartoesRam[i].nome;
+        if (cartoesRam[i].uid[0] != '\0') uidResolvido = cartoesRam[i].uid;
+        break;
+      }
+    }
+  } else if (fsPtr) {
+    JsonDocument doc;
+    carregarJsonDoArquivo(ARQ_CARTOES, doc);
+    JsonArray arr = doc.as<JsonArray>();
+
+    for (JsonObject c : arr) {
+      uint16_t cBio = c["bio_id"] | 0;
+      String cUid = c["uid"].as<String>();
+      if (cBio == bioId || cUid.equalsIgnoreCase(uidVirtual)) {
+        encontrado = true;
+        ativo = c["ativo"].as<bool>();
+        nome = c["nome"].as<String>();
+        if (!cUid.isEmpty()) uidResolvido = cUid;
+        break;
+      }
+    }
+  }
+
+  uint32_t durValidacaoMs = (micros() - inicioBuscaUs) / 1000;
+  nfcUltimaDuracaoMs = durValidacaoMs;
+
+  uint8_t res = (!encontrado) ? 1 : (ativo ? 0 : 2);
+
+  registrarAcessoNoHistorico(uidResolvido, nome, res);
+  xSemaphoreGive(travaDados);
+
+  xSemaphoreTake(travaUltimo, portMAX_DELAY);
+  ultimoUidLido = uidResolvido;
+  ultimoMetodoLido = "biometria";
+  ultimoBioIdLido = bioId;
+  ultimoLidoMs = millis();
+  ultimoSeq++;
+  ultimoCadastrado = encontrado;
+  ultimoNomeLido = nome;
+  xSemaphoreGive(travaUltimo);
+
+  String tempoValidacao = " | validacao " + String(durValidacaoMs) + " ms";
+  String msgLog;
+  const char* nivelLog = "wa";
+
+  Serial.println("\n====================================");
+  Serial.printf("Biometria Detectada: Posicao #%u (%s)\n", bioId, uidResolvido.c_str());
+  if (encontrado) Serial.printf("Titular: %s\n", nome.c_str());
+
+  if (res == 0) {
+    msgLog = "BIOMETRIA LIBERADA: " + nome + " [#" + String(bioId) + " / " + uidResolvido + "]" + tempoValidacao;
+    nivelLog = "ok";
+    acionarLedFeedback(0, 255, 0, 1800);
+    acionarSaidaFechadura();
+  } else if (res == 2) {
+    msgLog = "BIOMETRIA NEGADA (Bloqueado): " + nome + " [#" + String(bioId) + "]" + tempoValidacao;
+    nivelLog = "err";
+    acionarLedFeedback(255, 0, 0, 1800);
+  } else {
+    msgLog = "BIOMETRIA NAO VINCULADA: [#" + String(bioId) + " / " + uidResolvido + "]" + tempoValidacao;
+    acionarLedFeedback(255, 0, 0, 1800);
+  }
+  Serial.println("====================================");
+
+  logSerial(msgLog, nivelLog);
+
+  uint32_t durMs = (micros() - inicioUs) / 1000;
+  if (durMs > diagNfcMaxMs) diagNfcMaxMs = durMs;
+}
+
+void processarCicloBiometria(uint32_t& ultimoVistoBioMs) {
+  if (!bioOk) return;
+
+  // Modo 1: Cadastro interativo em 2 toques iniciado pelo Painel Web
+  if (bioCadastroAtivo) {
+    if (millis() - bioCadastroInicioMs > 30000) {
+      bioCadastroAtivo = false;
+      bioCadastroEtapa = "erro";
+      bioCadastroMsg = "Tempo esgotado (30s) para encostar o dedo no sensor.";
+      acionarLedFeedback(255, 0, 0, 1500);
+      return;
+    }
+
+    if (bioCadastroEtapa == "aguardando_dedo_1") {
+      if (bioCapturarImagem() == 0x00) {
+        if (bioImagemParaTz(1) == 0x00) {
+          bioCadastroEtapa = "remova_dedo";
+          bioCadastroMsg = "1a leitura capturada! Retire o dedo do sensor...";
+          acionarLedFeedback(0, 140, 255, 800);
+        } else {
+          bioCadastroMsg = "Imagem borrada. Tente encostar o dedo novamente...";
+        }
+      }
+      return;
+    }
+
+    if (bioCadastroEtapa == "remova_dedo") {
+      if (bioCapturarImagem() == 0x02) { // 0x02 = sem dedo no sensor
+        bioCadastroEtapa = "aguardando_dedo_2";
+        bioCadastroMsg = "Encoste o MESMO dedo novamente para confirmar (2a leitura)...";
+      }
+      return;
+    }
+
+    if (bioCadastroEtapa == "aguardando_dedo_2") {
+      if (bioCapturarImagem() == 0x00) {
+        if (bioImagemParaTz(2) == 0x00 &&
+            bioCriarModelo() == 0x00 &&
+            bioSalvarModelo(bioCadastroId) == 0x00) {
+          bioCadastroAtivo = false;
+          bioCadastroEtapa = "concluido";
+          bioCadastroMsg = "Biometria gravada com sucesso na posicao #" + String(bioCadastroId) + "!";
+          acionarLedFeedback(0, 255, 0, 1800);
+          logSerial("[BIO] Digital gravada na posicao #" + String(bioCadastroId), "ok");
+        } else {
+          bioCadastroAtivo = false;
+          bioCadastroEtapa = "erro";
+          bioCadastroMsg = "As duas leituras nao coincidiram. Tente novamente.";
+          acionarLedFeedback(255, 0, 0, 1800);
+          logSerial("[BIO] Falha ao combinar digitais na posicao #" + String(bioCadastroId), "err");
+        }
+      }
+      return;
+    }
+    return;
+  }
+
+  // Modo 2: Leitura passiva contínua na portaria (1:N)
+  int rcImg = bioCapturarImagem();
+  if (rcImg == 0x00) {
+    if (bioImagemParaTz(1) == 0x00) {
+      uint16_t idEncontrado = 0;
+      uint16_t score = 0;
+      int rcBusca = bioBuscarDigital(&idEncontrado, &score);
+      uint32_t agora = millis();
+      if (rcBusca == 0x00 && idEncontrado >= 1) {
+        if (idEncontrado == ultimoBioIdLido && (agora - ultimoVistoBioMs < 2000)) {
+          ultimoVistoBioMs = agora;
+        } else {
+          ultimoVistoBioMs = agora;
+          processarLeituraBiometria(idEncontrado);
+        }
+      } else {
+        if (agora - ultimoVistoBioMs >= 2000) {
+          ultimoVistoBioMs = agora;
+          logSerial("BIOMETRIA NAO RECONHECIDA no sensor optico", "wa");
+          acionarLedFeedback(255, 0, 0, 1400);
+        }
+      }
+    }
+  }
+}
+
 // Tarefa dedicada do Core 0 (FreeRTOS)
 void tarefaNFC(void* parametro) {
   Serial.println("[Core 0] Tarefa do Leitor NFC em execucao.");
@@ -1187,6 +1508,7 @@ void tarefaNFC(void* parametro) {
   uint32_t ultimaLeituraOk = millis();
   nfcUltimaLeituraMs = millis();
   uint32_t ultimoWatchdogNfc = 0;
+  uint32_t ultimoVistoBioMs = 0;
 
   for (;;) {
     // 0a. Reinício do leitor pedido pelo Core 1 (console/página, sem reboot).
@@ -1209,7 +1531,7 @@ void tarefaNFC(void* parametro) {
     // 1. Se o módulo estiver desconectado, tenta reconectar periodicamente.
     // A recuperação do barramento + reset do módulo rodam sob a trava para não
     // colidir com uma gravação na flash (que suspende os dois núcleos).
-    if (!nfcOk) {
+    if (!nfcOk && !bioOk) {
       vTaskDelay(pdMS_TO_TICKS(1500));
       bool reconectou = reiniciarLeitorCompleto(true);
       if (reconectou) {
@@ -1217,6 +1539,9 @@ void tarefaNFC(void* parametro) {
         nfcReconexoes++;
         falhasHeartbeatNfc = 0;
         Serial.println("\n[HARDWARE] Leitor NFC PN532 reconectado (versao + SAM conferidos).");
+      }
+      if (!bioOk) {
+        bioOk = iniciarBiometria(false);
       }
       continue;
     }
@@ -1226,7 +1551,7 @@ void tarefaNFC(void* parametro) {
     // 2. Heartbeat I2C a cada 5 s, com histerese: uma falha isolada não derruba
     // o leitor (antes o LED laranja piscava por qualquer ruído no barramento).
     // Também não sonda logo após uma leitura bem-sucedida: ela já provou que vive.
-    if (agora - ultimoHeartbeatNfc >= 5000 && agora - ultimaLeituraOk > 3000) {
+    if (nfcOk && agora - ultimoHeartbeatNfc >= 5000 && agora - ultimaLeituraOk > 3000) {
       ultimoHeartbeatNfc = agora;
       if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
       uint32_t versao = nfc.getFirmwareVersion();
@@ -1249,7 +1574,7 @@ void tarefaNFC(void* parametro) {
     // vazio, mas também pode ser o estado "zumbi" (responde à versão e não lê).
     // O reinício completo é barato (só I2C) e devolve o leitor sozinho; fica
     // limitado a uma tentativa a cada 10 min.
-    if (agora - nfcUltimaLeituraMs > NFC_WATCHDOG_OCIOSO_MS &&
+    if (nfcOk && agora - nfcUltimaLeituraMs > NFC_WATCHDOG_OCIOSO_MS &&
         agora - ultimoWatchdogNfc > NFC_WATCHDOG_INTERVALO_MS) {
       ultimoWatchdogNfc = agora;
       bool recuperou = reiniciarLeitorCompleto(true);
@@ -1262,9 +1587,12 @@ void tarefaNFC(void* parametro) {
     }
 
     // 3. Leitura passiva com timeout curto (50ms), sem gravação de flash em voo.
-    if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
-    bool detectado = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uidBuffer, &uidLength, 50);
-    if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
+    bool detectado = false;
+    if (nfcOk) {
+      if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
+      detectado = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uidBuffer, &uidLength, 50);
+      if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
+    }
 
     if (detectado && uidLength > 0 && uidLength <= 10) {
       ultimaLeituraOk = millis();
@@ -1288,6 +1616,7 @@ void tarefaNFC(void* parametro) {
       }
     }
 
+    processarCicloBiometria(ultimoVistoBioMs);
     vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
@@ -1516,6 +1845,8 @@ void rotaSincronizarAluno() {
       uid = normalizarUid(body["uid"].as<String>());
       nome = body["nome"].as<String>();
       ativo = body["ativo"].as<bool>();
+      uint16_t bId = body["bio_id"] | 0;
+      if (bId >= 1 && bId <= 300) server.sendHeader("X-Bio-Id", String(bId));
     }
   }
 
@@ -1539,6 +1870,7 @@ void rotaSincronizarAluno() {
     if (c["uid"].as<String>().equalsIgnoreCase(uid)) {
       c["ativo"] = ativo;
       if (!nome.isEmpty()) c["nome"] = nome;
+      if (server.hasArg("plain")) { JsonDocument b; if (deserializeJson(b, server.arg("plain")) == DeserializationError::Ok && (b["bio_id"] | 0) > 0) c["bio_id"] = (uint16_t)(b["bio_id"] | 0); }
       achou = true;
       break;
     }
@@ -1549,6 +1881,7 @@ void rotaSincronizarAluno() {
     novo["uid"] = uid;
     novo["nome"] = nome.isEmpty() ? "Aluno" : nome;
     novo["ativo"] = ativo;
+    if (server.hasArg("plain")) { JsonDocument b; if (deserializeJson(b, server.arg("plain")) == DeserializationError::Ok && (b["bio_id"] | 0) > 0) novo["bio_id"] = (uint16_t)(b["bio_id"] | 0); }
   }
 
   salvarJsonNoArquivo(ARQ_CARTOES, doc);
@@ -1625,25 +1958,31 @@ void rotaRemoverAlunoSincronizado() {
 void rotaUltimoCartao() {
   // Rota de leitura pública para totens e portaria web na rede local.
   // Copia o estado sob trava antes de serializar: as Strings são escritas no Core 0.
-  String uid, nome;
+  String uid, nome, metodo;
   bool cadastrado = false;
   uint32_t seq = 0, lidoMs = 0;
+  uint16_t bioId = 0;
 
   xSemaphoreTake(travaUltimo, portMAX_DELAY);
   uid = ultimoUidLido;
   nome = ultimoNomeLido;
   cadastrado = ultimoCadastrado;
+  metodo = ultimoMetodoLido;
+  bioId = ultimoBioIdLido;
   seq = ultimoSeq;
   lidoMs = ultimoLidoMs;
   xSemaphoreGive(travaUltimo);
 
   JsonDocument doc;
   doc["nfc_ok"] = nfcOk;
+  doc["bio_ok"] = bioOk;
   doc["seq"] = seq;
   if (seq > 0) {
     doc["uid"] = uid;
     doc["nome"] = nome;
     doc["cadastrado"] = cadastrado;
+    doc["metodo"] = metodo;
+    if (bioId > 0) doc["bio_id"] = bioId;
     doc["ha"] = (millis() - lidoMs) / 1000;
   }
   String s;
@@ -1723,6 +2062,8 @@ void rotaStatusSistema() {
   doc["wifi_faixas"] = RADIO_WIFI_FAIXAS;
   doc["bluetooth"] = RADIO_BLUETOOTH;
   doc["nfc"] = nfcOk;
+  doc["bio"] = bioOk;
+  doc["bio_ok"] = bioOk;
   doc["psram"] = ESP.getPsramSize() / (1024 * 1024);
   doc["psram_livre"] = ESP.getFreePsram();
   doc["flash"] = ESP.getFlashChipSize() / (1024 * 1024);
@@ -2256,6 +2597,8 @@ void rotaObterLogsConsole() {
   JsonDocument doc;
   doc["uptime"] = millis() / 1000;
   doc["nfc"] = nfcOk;
+  doc["bio"] = bioOk;
+  doc["bio_ok"] = bioOk;
   doc["ip"] = (modoAP ? WiFi.softAPIP() : WiFi.localIP()).toString();
 
   JsonArray arr = doc["logs"].to<JsonArray>();
@@ -2609,6 +2952,78 @@ void rotaUploadPainelArquivo() {
   }
 }
 
+void rotaBioIniciar() {
+  if (!bioOk) return responderErro(503, "Sensor biometrico AS608/FPM10A nao detectado nos pinos 18/17.");
+  uint16_t id = 0;
+  if (server.hasArg("plain")) {
+    JsonDocument body;
+    if (deserializeJson(body, server.arg("plain")) == DeserializationError::Ok) {
+      id = body["id"] | 0;
+    }
+  }
+  if (id == 0 && server.hasArg("id")) id = server.arg("id").toInt();
+  if (id < 1 || id > 300) return responderErro(400, "Posicao de biometria invalida (use 1 a 300).");
+
+  bioCadastroId = id;
+  bioCadastroEtapa = "aguardando_dedo_1";
+  bioCadastroMsg = "Posicao #" + String(id) + ": encoste o dedo no sensor optico (1a leitura)...";
+  bioCadastroInicioMs = millis();
+  bioCadastroAtivo = true;
+
+  JsonDocument resp;
+  resp["ok"] = true;
+  resp["id"] = id;
+  resp["etapa"] = bioCadastroEtapa;
+  resp["mensagem"] = bioCadastroMsg;
+  String s;
+  serializeJson(resp, s);
+  responderJson(200, s);
+}
+
+void rotaBioStatus() {
+  JsonDocument resp;
+  resp["ok"] = true;
+  resp["ativo"] = bioCadastroAtivo;
+  resp["id"] = bioCadastroId;
+  resp["etapa"] = bioCadastroEtapa;
+  resp["mensagem"] = bioCadastroMsg;
+  if (bioCadastroEtapa == "concluido" && bioCadastroId >= 1) {
+    resp["uid_virtual"] = gerarUidVirtualBio(bioCadastroId);
+  }
+  String s;
+  serializeJson(resp, s);
+  responderJson(200, s);
+}
+
+void rotaBioCancelar() {
+  bioCadastroAtivo = false;
+  bioCadastroEtapa = "inativo";
+  bioCadastroMsg = "Cadastro cancelado.";
+  responderJson(200, "{\"ok\":true,\"cancelado\":true}");
+}
+
+void rotaBioExcluir() {
+  if (!bioOk) return responderErro(503, "Sensor biometrico ausente.");
+  uint16_t id = 0;
+  if (server.hasArg("plain")) {
+    JsonDocument body;
+    if (deserializeJson(body, server.arg("plain")) == DeserializationError::Ok) {
+      id = body["id"] | 0;
+    }
+  }
+  if (id == 0 && server.hasArg("id")) id = server.arg("id").toInt();
+  if (id < 1 || id > 300) return responderErro(400, "Posicao de biometria invalida (use 1 a 300).");
+
+  int rc = bioExcluirModelo(id);
+  JsonDocument resp;
+  resp["ok"] = (rc == 0x00);
+  resp["id"] = id;
+  resp["removido"] = (rc == 0x00);
+  String s;
+  serializeJson(resp, s);
+  responderJson(200, s);
+}
+
 void configurarRotasServidor() {
   // Necessário para ler Accept-Encoding e servir os .gz do painel.
   static const char* CABECALHOS_PAINEL[] = {"Accept-Encoding"};
@@ -2630,6 +3045,10 @@ void configurarRotasServidor() {
   server.on("/api/sincronizar_aluno", HTTP_POST, rotaSincronizarAluno);
   server.on("/api/sincronizar_todos", HTTP_POST, rotaSincronizarTodosAlunos);
   server.on("/api/remover_aluno",     HTTP_POST, rotaRemoverAlunoSincronizado);
+  server.on("/api/biometria/iniciar",  HTTP_POST, rotaBioIniciar);
+  server.on("/api/biometria/status",   HTTP_GET,  rotaBioStatus);
+  server.on("/api/biometria/cancelar", HTTP_POST, rotaBioCancelar);
+  server.on("/api/biometria/excluir",  HTTP_POST, rotaBioExcluir);
   server.on("/api/ultimo",    HTTP_GET,    rotaUltimoCartao);
   server.on("/api/log",       HTTP_GET,    rotaObterLog);
   server.on("/api/log",       HTTP_DELETE, rotaLimparLog);
@@ -2792,6 +3211,8 @@ void setup() {
   if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
   nfcOk = iniciarPN532(true);
   if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
+  bioOk = iniciarBiometria(true);
+  logSerial(String("[BOOT] Biometria AS608/FPM10A ") + (bioOk ? "OK" : "AUSENTE (opcional)"), bioOk ? "ok" : "info");
   logSerial(String("[BOOT] PN532 ") + (nfcOk ? "OK" : "AUSENTE") + " em " + String(millis() - marcaNfc) + " ms", nfcOk ? "ok" : "err");
 
   // Cria a tarefa de leitura do NFC no CORE 0 ANTES do Wi-Fi: o leitor funciona

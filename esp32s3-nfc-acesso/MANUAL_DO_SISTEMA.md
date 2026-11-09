@@ -66,6 +66,17 @@ O módulo PN532 possui duas pequenas chavinhas brancas numeradas **1** e **2**. 
 | **RSTPD_N** (pad no **verso** da placa) | **GPIO 5** (opcional) | Reset do CI | **Não é o `RSTO` da fileira frontal.** O reset do PN532 fica num pad separado no verso das placas vermelhas. Só é necessário para a recuperação automática; o leitor funciona com 4 fios. |
 | **IRQ** | **GPIO 2** (opcional) | Interrupção | Em I2C a biblioteca consulta o byte RDY e não usa a IRQ; ligar evita um fio solto e melhora a imunidade. |
 
+#### 2.3.1. Ligação Opcional do Sensor de Biometria (AS608 / FPM10A / DY50)
+O sistema suporta operação **híbrida** (Cartão NFC + Impressão Digital simultaneamente, ou apenas um dos dois). O chicote do sensor óptico tem 6 vias (numeradas da direita para a esquerda olhando o conector branco por trás), mas apenas os **4 primeiros fios** são usados:
+
+| Pino no Sensor Biométrico | Pino no ESP32-S3 | Função | Explicação |
+| :--- | :--- | :--- | :--- |
+| **Pino 1 (VCC / Vin)** | **3V3** | Alimentação 3.3V | Alimenta o processador DSP e o LED óptico do prisma. |
+| **Pino 2 (TX / TD)** | **GPIO 18** (`BIO_RX_PIN`) | Dados Sensor → ESP | O sensor transmite a leitura para o receptor `RX` da UART1. |
+| **Pino 3 (RX / RD)** | **GPIO 17** (`BIO_TX_PIN`) | Dados ESP → Sensor | O ESP32 envia comandos pelo transmissor `TX` da UART1. |
+| **Pino 4 (GND)** | **GND** | Terra (Negativo) | Referência elétrica comum. |
+| **Pinos 5 e 6 (Tch / Va)** | *Desconectados* | Toque opcional | Não utilizados (a varredura óptica é feita automaticamente pelo Core 0). |
+
 > [!NOTE]
 > **4 fios bastam para ler cartões.** O RSTPD_N e a IRQ são opcionais. O `RSTO` da fileira frontal **não** é o reset do CI — não ligue o GPIO 5 nele. A diferença do RSTPD_N aparece só numa falha: com o fio, o firmware reinicia o PN532 sozinho; sem ele, é preciso desligar/religar a placa. A IRQ não é usada em I2C. *(O PN532 tem um travamento conhecido; o reset por hardware é o contorno recomendado.)*
 >
@@ -267,7 +278,9 @@ O ESP32 trabalha de forma integrada com a aplicação web escolar ([escola-nfc-w
 * `POST /api/remover_aluno`:
   * Remove o UID da lista interna quando o aluno é excluído do sistema.
 * `GET /api/ultimo`:
-  * Fornece à tela da Portaria o último cartão lido com contador de sequência (`seq`) para disparo instantâneo da ficha do aluno.
+  * Fornece à tela da Portaria o último cartão ou digital lida com contador de sequência (`seq`), `metodo` (`"nfc"` ou `"biometria"`) e `bio_id` para disparo instantâneo da ficha do aluno.
+* `POST /api/biometria/iniciar`, `GET /api/biometria/status`, `POST /api/biometria/cancelar` e `POST /api/biometria/excluir`:
+  * Permitem gravar (em 2 toques guiados na tela) ou remover digitais na memória interna do sensor óptico (posições `1` a `300`) diretamente pelo painel web. Alunos sem cartão físico NFC recebem automaticamente o UID virtual `FB:10:00:XX`.
 * `GET /api/log`: últimos **50** acessos, servidos do cache em RAM (sem leitura de Flash). Exige o login Basic do painel. `DELETE /api/log` limpa o histórico.
 
 ### Rotas do Painel Web (LittleFS):
