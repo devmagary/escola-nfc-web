@@ -10,7 +10,7 @@ import {
   formatarDataHora, formatarHora, formatarTelefone, telefoneParaWhatsapp, dataParaInput,
   inicioDoDiaISO, fimDoDiaISO, inicioDoDiaDeInput, fimDoDiaDeInput, debounce, gerarId,
   formatarTamanho, baixarArquivo, paraCsv, parseCsv, mapearCabecalhoCsv, valorDoCsv, boolDoCsv,
-  podeUsarWebcam
+  podeUsarWebcam, normalizarBiometriaId, biometriaIdValido, gerarUidVirtualBiometria, ehUidVirtualBiometria, extrairBiometriaIdDeUid
 } from './lib/utils.js';
 import * as Supabase from './services/supabase.js';
 import * as Esp32 from './services/esp32.js';
@@ -91,6 +91,7 @@ const state = {
   cartaoPendente: null,
   ultimoProcessamento: new Map(),
   nfcAbort: null,
+  bioAbort: null,
   importPreview: null,
   confirmResolver: null,
   carregandoAlunos: false,
@@ -126,6 +127,8 @@ function mensagemErro(erro) {
     'Invalid Refresh Token': 'Sua sessão expirou. Entre novamente.',
     'new row violates row-level security policy': 'Seu perfil não tem permissão para esta ação.',
     'duplicate key value violates unique constraint "alunos_uid_nfc_key"': 'Este cartão NFC já está cadastrado para outro aluno.',
+    'duplicate key value violates unique constraint "alunos_biometria_id_key"': 'Esta posição de biometria já está ocupada por outro aluno.',
+    'duplicate key value violates unique constraint "idx_alunos_biometria_id"': 'Esta posição de biometria já está ocupada por outro aluno.',
     'duplicate key value violates unique constraint "alunos_matricula_key"': 'Esta matrícula já está cadastrada para outro aluno.'
   };
   if (mapa[mensagem]) return mapa[mensagem];
@@ -206,6 +209,7 @@ function fecharModal(id) {
   }
   if (id === 'modalCamera') fecharCamera();
   if (id === 'modalNfc') cancelarCapturaUid();
+  if (id === 'modalBiometria') cancelarCapturaBiometria();
 }
 
 function fecharModalDoTopo() {
@@ -541,7 +545,7 @@ function iniciarServicosDaSessao() {
   if (!Esp32.espEmHttpsBloqueado()) {
     Esp32.iniciarMonitoramento({
       onStatus: aoStatusEsp,
-      onCartao: (uid) => processarCartao(uid)
+      onCartao: (uid, dados) => processarCartao(uid, dados)
     });
   } else {
     aoStatusEsp({ estado: 'bloqueado' });
@@ -741,14 +745,14 @@ function aoStatusEsp(status) {
   if (dot) dot.className = 'dot online';
   if (texto) texto.textContent = 'Online';
   if (badge) badge.title = `Conectado ao ESP32 em ${Esp32.obterUrlEsp()}. Clique para alterar.`;
-  if (dados?.nfc_ok === false) {
+  if (dados?.nfc_ok === false && dados?.bio_ok !== true) {
     if (dot) dot.className = 'dot offline';
     if (texto) texto.textContent = 'Leitor OFF';
   }
   mostrar(banner, false);
 }
 
-async function processarCartao(uid) {
+async function processarCartao(uid, dadosLeitura = null) {
   if (state.processandoCartao) {
     state.cartaoPendente = uid;
     return;
@@ -756,7 +760,9 @@ async function processarCartao(uid) {
   state.processandoCartao = true;
 
   try {
-    const normalizado = normalizarUid(uid) || uid;
+    const bioId = normalizarBiometriaId(dadosLeitura?.bio_id) || extrairBiometriaIdDeUid(uid);
+    const ehBiometria = Boolean(dadosLeitura?.metodo === 'BIOMETRIA' || bioId !== null);
+    const normalizado = normalizarUid(uid) || (bioId ? gerarUidVirtualBiometria(bioId) : '') || uid;
     const agora = Date.now();
     const ultimo = state.ultimoProcessamento.get(normalizado) || 0;
     if (agora - ultimo < 2500) return;
@@ -764,10 +770,15 @@ async function processarCartao(uid) {
 
     let aluno = null;
     try {
-      aluno = await Supabase.buscarAlunoPorUid(normalizado);
+      if (bioId !== null) {
+        aluno = await Supabase.buscarAlunoPorBiometria(bioId);
+      }
+      if (!aluno && normalizado) {
+        aluno = await Supabase.buscarAlunoPorUid(normalizado);
+      }
     } catch (erroConsulta) {
       // Sem internet, usa a base já carregada/cacheada neste dispositivo.
-      const doCache = state.alunos.find((a) => normalizarUid(a.uid_nfc) === normalizado);
+      const doCache = state.alunos.find((a) => (bioId !== null && Number(a.biometria_id) === bioId) || normalizarUid(a.uid_nfc) === normalizado);
       if (!doCache) throw erroConsulta;
       aluno = doCache;
       toast('Nuvem indisponível. Exibindo dados da base local em cache.', 'err');
@@ -786,11 +797,11 @@ async function processarCartao(uid) {
     };
 
     if (aluno) {
-      renderizarTotem(aluno, aluno.ativo);
+      renderizarTotem(aluno, aluno.ativo, ehBiometria, bioId);
       emitirBip(aluno.ativo ? 'ok' : 'erro');
       montarWhatsapp(aluno, momento);
     } else {
-      renderizarTotemDesconhecido(normalizado);
+      renderizarTotemDesconhecido(normalizado, ehBiometria, bioId);
       emitirBip('erro');
       montarWhatsapp(null);
     }
@@ -809,7 +820,7 @@ async function processarCartao(uid) {
   }
 }
 
-function renderizarTotem(aluno, liberado) {
+function renderizarTotem(aluno, liberado, ehBiometria = false, bioId = null) {
   const card = $('cardTotem');
   const badge = $('totemStatusBadge');
   const foto = $('totemFoto');
@@ -824,24 +835,26 @@ function renderizarTotem(aluno, liberado) {
   $('totemResponsavel').textContent = aluno.nome_responsavel || '—';
   card.className = `card-totem ${liberado ? 'liberado' : 'bloqueado'}`;
   badge.className = `tag-status-acesso ${liberado ? 'status-liberado' : 'status-negado'}`;
-  badge.textContent = liberado ? 'ACESSO LIBERADO' : 'ACESSO BLOQUEADO';
+  const idBio = bioId || aluno.biometria_id || '';
+  const sufixo = ehBiometria ? ` · DIGITAL ${idBio ? `#${idBio}` : ''}`.trimEnd() : '';
+  badge.textContent = (liberado ? 'ACESSO LIBERADO' : 'ACESSO BLOQUEADO') + sufixo;
 }
 
-function renderizarTotemDesconhecido(uid) {
+function renderizarTotemDesconhecido(uid, ehBiometria = false, bioId = null) {
   const card = $('cardTotem');
   const badge = $('totemStatusBadge');
   const foto = $('totemFoto');
   if (!card || !badge || !foto) return;
   foto.src = obterAvatarPadrao('?');
   foto.alt = 'Cartão não cadastrado';
-  $('totemNome').textContent = 'Cartão Desconhecido';
+  $('totemNome').textContent = ehBiometria ? 'Digital Desconhecida' : 'Cartão Desconhecido';
   $('totemMatricula').textContent = '—';
   $('totemTurma').textContent = '—';
   $('totemCurso').textContent = '—';
   $('totemResponsavel').textContent = '—';
   card.className = 'card-totem bloqueado';
   badge.className = 'tag-status-acesso status-negado';
-  badge.textContent = `NÃO CADASTRADO (${uid})`;
+  badge.textContent = ehBiometria && bioId ? `NÃO CADASTRADO (DIGITAL #${bioId})` : `NÃO CADASTRADO (${uid})`;
 }
 
 function resetarTotem() {
@@ -1233,7 +1246,9 @@ function alunosFiltrados() {
     if (!busca) return true;
     return [
       aluno.nome_completo, aluno.matricula, aluno.turma, aluno.curso,
-      aluno.nome_responsavel, aluno.telefone_responsavel, aluno.uid_nfc
+      aluno.nome_responsavel, aluno.telefone_responsavel, aluno.uid_nfc,
+      aluno.biometria_id ? `#${aluno.biometria_id}` : '',
+      aluno.biometria_id ? `digital ${aluno.biometria_id}` : ''
     ].some((valor) => normalizarTexto(valor).includes(busca));
   });
 }
@@ -1281,7 +1296,12 @@ function renderizarTabelaAlunos() {
       'Responsável'
     );
 
-    const tdUid = tdHtml(`<span class="uid-chip">${escapeHtml(aluno.uid_nfc)}</span>`, 'Cartão NFC');
+    const bioIdAluno = normalizarBiometriaId(aluno.biometria_id) || extrairBiometriaIdDeUid(aluno.uid_nfc);
+    const soBiometria = ehUidVirtualBiometria(aluno.uid_nfc);
+    const htmlIdentificacao = soBiometria
+      ? `<span class="uid-chip bio-chip" title="Cadastrado exclusivamente por biometria (${escapeHtml(aluno.uid_nfc)})">Digital #${escapeHtml(String(bioIdAluno ?? '?'))}</span>`
+      : `<span class="uid-chip">${escapeHtml(aluno.uid_nfc)}</span>${bioIdAluno ? ` <span class="uid-chip bio-chip" title="Posição da digital no sensor óptico">Digital #${escapeHtml(String(bioIdAluno))}</span>` : ''}`;
+    const tdUid = tdHtml(htmlIdentificacao, 'NFC / Biometria');
 
     const tdAcoes = document.createElement('td');
     tdAcoes.dataset.label = 'Ações';
@@ -1321,7 +1341,9 @@ function iniciarEdicaoAluno(aluno) {
   $('campoCurso').value = aluno.curso || '';
   $('campoResponsavel').value = aluno.nome_responsavel || '';
   $('campoTelefone').value = aluno.telefone_responsavel ? formatarTelefone(aluno.telefone_responsavel) : '';
-  $('campoUid').value = aluno.uid_nfc || '';
+  const bioIdEdicao = normalizarBiometriaId(aluno.biometria_id) || extrairBiometriaIdDeUid(aluno.uid_nfc);
+  $('campoUid').value = ehUidVirtualBiometria(aluno.uid_nfc) ? '' : (aluno.uid_nfc || '');
+  if ($('campoBiometria')) $('campoBiometria').value = bioIdEdicao !== null ? String(bioIdEdicao) : '';
   $('campoAtivo').checked = Boolean(aluno.ativo);
   if ($('previewFotoForm')) $('previewFotoForm').src = aluno.foto_url || obterAvatarPadrao(aluno.nome_completo);
   if ($('fotoInfo')) $('fotoInfo').textContent = aluno.foto_url ? 'Foto atual. Escolha outra para substituir.' : 'Nenhuma foto cadastrada.';
@@ -1352,11 +1374,26 @@ function limparFormularioAluno() {
 function validarFormularioAluno() {
   const nome = $('campoNome')?.value.trim() || '';
   const turma = $('campoTurma')?.value.trim() || '';
-  const uid = normalizarUid($('campoUid')?.value || '');
+  const uidTexto = $('campoUid')?.value.trim() || '';
+  const bioTexto = $('campoBiometria')?.value.trim() || '';
+  const bioId = normalizarBiometriaId(bioTexto);
+  const uid = normalizarUid(uidTexto) || (bioId !== null ? gerarUidVirtualBiometria(bioId) : '');
 
   if (nome.length < 3) return 'Informe o nome completo do aluno (mínimo 3 caracteres).';
   if (!turma) return 'Informe a turma do aluno.';
-  if (!uid) return 'Cartão NFC inválido. Use o formato hexadecimal, por exemplo 2C:9D:7E:8E.';
+  if (bioTexto && bioId === null) {
+    return 'Posição de biometria inválida. Informe um número inteiro entre 1 e 300.';
+  }
+  if (!uidTexto && bioId === null) {
+    return 'Informe o Cartão NFC ou cadastre uma posição de Biometria (ou ambos).';
+  }
+  if (uidTexto && !normalizarUid(uidTexto)) {
+    return 'Cartão NFC inválido. Use o formato hexadecimal, por exemplo 2C:9D:7E:8E.';
+  }
+  if (bioId !== null) {
+    const duplicadoBio = state.alunos.find((a) => a.id !== state.alunoEditandoId && (Number(a.biometria_id) === bioId || extrairBiometriaIdDeUid(a.uid_nfc) === bioId));
+    if (duplicadoBio) return `A posição de biometria #${bioId} já está ocupada por ${duplicadoBio.nome_completo}.`;
+  }
 
   const duplicadoUid = state.alunos.find((a) => a.id !== state.alunoEditandoId && normalizarUid(a.uid_nfc) === uid);
   if (duplicadoUid) return `Este cartão já está cadastrado para ${duplicadoUid.nome_completo}.`;
@@ -1387,7 +1424,8 @@ async function salvarAluno(evento) {
   const botao = $('btnSalvarAluno');
   botaoCarregando(botao, true, 'Salvando...');
 
-  const uid = normalizarUid($('campoUid').value);
+  const bioId = normalizarBiometriaId($('campoBiometria')?.value || '');
+  const uid = normalizarUid($('campoUid').value) || gerarUidVirtualBiometria(bioId);
   let novoUpload = null;
 
   try {
@@ -1414,6 +1452,7 @@ async function salvarAluno(evento) {
       telefone_responsavel: normalizarTelefone($('campoTelefone').value) || null,
       foto_url: fotoUrl,
       foto_path: fotoPath,
+      biometria_id: bioId,
       ativo: Boolean($('campoAtivo').checked)
     };
 
@@ -1428,7 +1467,7 @@ async function salvarAluno(evento) {
     }
 
     if (!Esp32.espEmHttpsBloqueado()) {
-      Esp32.sincronizarAluno(uid, payload.nome_completo, payload.ativo).catch((erro) => {
+      Esp32.sincronizarAluno(uid, payload.nome_completo, payload.ativo, bioId).catch((erro) => {
         console.warn('[esp32] não sincronizou aluno', erro);
         toast('Aluno salvo na nuvem, mas o ESP32 não confirmou a sincronização.', 'err');
       });
@@ -1466,7 +1505,7 @@ async function alternarAtivoAluno(aluno) {
     await Supabase.alterarAtivoAluno(aluno.id, novoStatus);
     aluno.ativo = novoStatus;
     if (!Esp32.espEmHttpsBloqueado()) {
-      Esp32.sincronizarAluno(normalizarUid(aluno.uid_nfc) || aluno.uid_nfc, aluno.nome_completo, novoStatus).catch(() => {
+      Esp32.sincronizarAluno(normalizarUid(aluno.uid_nfc) || aluno.uid_nfc, aluno.nome_completo, novoStatus, aluno.biometria_id).catch(() => {
         toast('Status salvo na nuvem; o ESP32 não confirmou a atualização.', 'err');
       });
     }
@@ -1490,7 +1529,11 @@ async function excluirAluno(aluno) {
   try {
     await Supabase.excluirAluno(aluno.id);
     if (aluno.foto_path) await Supabase.removerFotoAluno(aluno.foto_path);
-    if (!Esp32.espEmHttpsBloqueado()) Esp32.removerAluno(normalizarUid(aluno.uid_nfc) || aluno.uid_nfc).catch(() => {});
+    if (!Esp32.espEmHttpsBloqueado()) {
+      Esp32.removerAluno(normalizarUid(aluno.uid_nfc) || aluno.uid_nfc).catch(() => {});
+      const bioIdRem = normalizarBiometriaId(aluno.biometria_id) || extrairBiometriaIdDeUid(aluno.uid_nfc);
+      if (bioIdRem !== null) Esp32.excluirBiometria(bioIdRem).catch(() => {});
+    }
     toast('Aluno excluído da nuvem e do leitor.', 'ok');
     await carregarAlunos();
   } catch (erro) {
@@ -1678,9 +1721,86 @@ function cancelarCapturaUid() {
 // Importação / exportação CSV
 // =====================================================================
 
+// =====================================================================
+// Captura de Biometria pelo sensor óptico
+// =====================================================================
+
+function sugerirProximaPosicaoBiometria() {
+  const ocupadas = new Set();
+  state.alunos.forEach((a) => {
+    if (a.id === state.alunoEditandoId) return;
+    const bId = normalizarBiometriaId(a.biometria_id) || extrairBiometriaIdDeUid(a.uid_nfc);
+    if (bId !== null) ocupadas.add(bId);
+  });
+  for (let i = 1; i <= 300; i += 1) {
+    if (!ocupadas.has(i)) return i;
+  }
+  return null;
+}
+
+function abrirCapturaBiometria() {
+  if (Esp32.espEmHttpsBloqueado()) {
+    toast('Para gravar biometria, abra o site pelo modo local (http://localhost:5500).', 'err');
+    abrirModalEsp();
+    return;
+  }
+
+  let idAlvo = normalizarBiometriaId($('campoBiometria')?.value || '');
+  if (idAlvo === null) {
+    idAlvo = sugerirProximaPosicaoBiometria();
+    if ($('campoBiometria') && idAlvo !== null) {
+      $('campoBiometria').value = String(idAlvo);
+    }
+  }
+
+  state.bioAbort = new AbortController();
+  if ($('bioStatus')) $('bioStatus').textContent = 'Passo 1 de 2: Encoste o dedo indicador no sensor...';
+  if ($('bioPosicao')) $('bioPosicao').textContent = idAlvo !== null ? `Posição #${idAlvo}` : '—';
+  if ($('bioInstrucao')) $('bioInstrucao').textContent = 'Apoie o centro do dedo indicador reto sobre o vidro iluminado do leitor.';
+  abrirModal('modalBiometria');
+
+  Esp32.capturarBiometriaInterativa({
+    idSugerido: idAlvo,
+    signal: state.bioAbort.signal,
+    onStep: (st) => {
+      if (st?.id && $('bioPosicao')) $('bioPosicao').textContent = `Posição #${st.id}`;
+      if (st?.mensagem && $('bioStatus')) $('bioStatus').textContent = st.mensagem;
+      else if (st?.etapa === 'aguardando_dedo_1' && $('bioStatus')) {
+        $('bioStatus').textContent = `Passo 1 de 2: Encoste o dedo no sensor... (${st.segundos || 0}s)`;
+      } else if (st?.etapa === 'remova_dedo' && $('bioStatus')) {
+        $('bioStatus').textContent = 'Ótimo! Agora retire o dedo do sensor...';
+      } else if (st?.etapa === 'aguardando_dedo_2' && $('bioStatus')) {
+        $('bioStatus').textContent = 'Passo 2 de 2: Encoste o mesmo dedo novamente para confirmar...';
+      }
+    }
+  })
+    .then((idGravado) => {
+      if ($('campoBiometria')) $('campoBiometria').value = String(idGravado);
+      if ($('bioPosicao')) $('bioPosicao').textContent = `Posição #${idGravado}`;
+      if ($('bioStatus')) $('bioStatus').textContent = 'Digital gravada com sucesso!';
+      toast(`Digital gravada na posição #${idGravado}!`, 'ok');
+      setTimeout(() => fecharModal('modalBiometria'), 900);
+    })
+    .catch((erro) => {
+      if ($('bioStatus')) $('bioStatus').textContent = mensagemErro(erro);
+      toast(mensagemErro(erro), 'err');
+    })
+    .finally(() => { state.bioAbort = null; });
+}
+
+function cancelarCapturaBiometria() {
+  if (state.bioAbort) {
+    state.bioAbort.abort();
+    state.bioAbort = null;
+  } else {
+    Esp32.cancelarCadastroBiometria().catch(() => {});
+  }
+}
+
 function baixarModeloCsv() {
-  const cabecalho = ['nome_completo', 'matricula', 'turma', 'curso', 'nome_responsavel', 'telefone_responsavel', 'uid_nfc', 'ativo'];
-  const exemplo = ['Maria Clara Souza', '20241002', 'Informática 2', 'Técnico em Informática', 'Carlos Roberto Souza', '84998765432', '2C:9D:7E:8E', 'sim'];
+  const cabecalho = ['nome_completo', 'matricula', 'turma', 'curso', 'nome_responsavel', 'telefone_responsavel', 'uid_nfc', 'biometria_id', 'ativo'];
+  const exemplo = ['Maria Clara Souza', '20241002', 'Informática 2', 'Técnico em Informática', 'Carlos Roberto Souza', '84998765432', '2C:9D:7E:8E', '1', 'sim'];
+
   baixarArquivo('modelo_alunos.csv', paraCsv(cabecalho, [exemplo]));
 }
 
@@ -1689,10 +1809,10 @@ function exportarAlunosCsv() {
     toast('Nenhum aluno cadastrado para exportar.', 'err');
     return;
   }
-  const cabecalho = ['nome_completo', 'matricula', 'turma', 'curso', 'nome_responsavel', 'telefone_responsavel', 'uid_nfc', 'ativo', 'foto_url'];
+  const cabecalho = ['nome_completo', 'matricula', 'turma', 'curso', 'nome_responsavel', 'telefone_responsavel', 'uid_nfc', 'biometria_id', 'ativo', 'foto_url'];
   const linhas = state.alunos.map((a) => [
     a.nome_completo, a.matricula || '', a.turma, a.curso || '', a.nome_responsavel || '',
-    a.telefone_responsavel || '', a.uid_nfc, a.ativo ? 'sim' : 'nao', a.foto_url || ''
+    a.telefone_responsavel || '', a.uid_nfc, a.biometria_id || '', a.ativo ? 'sim' : 'nao', a.foto_url || ''
   ]);
   baixarArquivo(`alunos_${dataParaInput()}.csv`, paraCsv(cabecalho, linhas));
   toast('Arquivo CSV exportado.', 'ok');
@@ -1718,7 +1838,7 @@ function prepararImportacao(texto) {
     const { headers, rows } = parseCsv(texto);
     if (!headers.length || !rows.length) throw new Error('O CSV está vazio ou não tem cabeçalho.');
     const mapa = mapearCabecalhoCsv(headers);
-    if (!mapa.nome_completo || !mapa.turma || !mapa.uid_nfc) {
+    if (!mapa.nome_completo || !mapa.turma || (!mapa.uid_nfc && !mapa.biometria_id)) {
       throw new Error('O CSV precisa ter as colunas nome_completo, turma e uid_nfc (ou seus apelidos: nome, turma, uid).');
     }
 
@@ -1733,7 +1853,8 @@ function prepararImportacao(texto) {
       const numero = indice + 2;
       const nome = valorDoCsv(row, mapa, 'nome_completo');
       const turma = valorDoCsv(row, mapa, 'turma');
-      const uid = normalizarUid(valorDoCsv(row, mapa, 'uid_nfc'));
+      const bioId = normalizarBiometriaId(valorDoCsv(row, mapa, 'biometria_id'));
+      const uid = normalizarUid(valorDoCsv(row, mapa, 'uid_nfc')) || (bioId !== null ? gerarUidVirtualBiometria(bioId) : '');
       const matricula = valorDoCsv(row, mapa, 'matricula');
       const errosLinha = [];
 
@@ -1761,6 +1882,7 @@ function prepararImportacao(texto) {
         nome_responsavel: valorDoCsv(row, mapa, 'nome_responsavel') || null,
         telefone_responsavel: normalizarTelefone(valorDoCsv(row, mapa, 'telefone_responsavel')) || null,
         foto_url: null,
+        biometria_id: bioId,
         foto_path: null,
         ativo: boolDoCsv(valorDoCsv(row, mapa, 'ativo'), true)
       });
@@ -2312,7 +2434,7 @@ function salvarEspConfig() {
   if ($('cfgEspUrl')) $('cfgEspUrl').value = normalizado;
   if (state.usuario && !Esp32.espEmHttpsBloqueado()) {
     Esp32.pararMonitoramento();
-    Esp32.iniciarMonitoramento({ onStatus: aoStatusEsp, onCartao: (uid) => processarCartao(uid) });
+    Esp32.iniciarMonitoramento({ onStatus: aoStatusEsp, onCartao: (uid, dados) => processarCartao(uid, dados) });
   } else if (Esp32.espEmHttpsBloqueado()) {
     aoStatusEsp({ estado: 'bloqueado' });
   }
@@ -2443,7 +2565,7 @@ function salvarEspModal() {
   if ($('cfgEspUrl')) $('cfgEspUrl').value = normalizado;
   if (state.usuario && !Esp32.espEmHttpsBloqueado()) {
     Esp32.pararMonitoramento();
-    Esp32.iniciarMonitoramento({ onStatus: aoStatusEsp, onCartao: (uid) => processarCartao(uid) });
+    Esp32.iniciarMonitoramento({ onStatus: aoStatusEsp, onCartao: (uid, dados) => processarCartao(uid, dados) });
   } else if (Esp32.espEmHttpsBloqueado()) {
     aoStatusEsp({ estado: 'bloqueado' });
   }
@@ -2496,6 +2618,9 @@ function ligarEventos() {
   });
   $('btnFecharModalNfc')?.addEventListener('click', () => fecharModal('modalNfc'));
   $('btnCancelarNfc')?.addEventListener('click', () => fecharModal('modalNfc'));
+  $('btnGravarBiometria')?.addEventListener('click', abrirCapturaBiometria);
+  $('btnFecharModalBiometria')?.addEventListener('click', () => fecharModal('modalBiometria'));
+  $('btnCancelarBiometria')?.addEventListener('click', () => fecharModal('modalBiometria'));
 
   $('btnCapturarFoto')?.addEventListener('click', capturarFotoWebcam);
   $('btnFecharCamera')?.addEventListener('click', () => fecharModal('modalCamera'));

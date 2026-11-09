@@ -247,13 +247,24 @@
             </div>
 
             <div class="form-group">
-              <label for="campoUid">Cartão NFC (UID hexadecimal) *</label>
+              <label for="campoUid">Cartão NFC (UID hexadecimal — opcional se usar Biometria)</label>
               <div class="campo-com-botao">
                 <input type="text" id="campoUid" class="form-control campo-mono" required placeholder="Ex: 2C:9D:7E:8E" autocomplete="off" spellcheck="false">
                 <button type="button" class="btn-secundario" id="btnPuxarUid" title="Aguardar a leitura de um cartão no ESP32">
                   📡 Puxar do leitor
                 </button>
               </div>
+            </div>
+
+            <div class="form-group">
+              <label for="campoBiometria">Digital / Biometria (Posição 1 a 127 — Opcional)</label>
+              <div class="campo-com-botao">
+                <input type="number" id="campoBiometria" class="form-control campo-mono" min="1" max="300" placeholder="Ex: 15 (ou deixe vazio)" autocomplete="off">
+                <button type="button" class="btn-secundario" id="btnGravarBiometria" title="Gravar a digital do aluno no sensor óptico conectado ao ESP32">
+                  Gravar no leitor
+                </button>
+              </div>
+              <small class="texto-suave">O aluno pode ter só Cartão NFC, só Biometria ou ambos simultaneamente.</small>
             </div>
 
             <div class="form-group">
@@ -302,7 +313,7 @@
                   <th>Aluno</th>
                   <th>Turma / Curso</th>
                   <th>Responsável</th>
-                  <th>Cartão NFC</th>
+                  <th>NFC / Biometria</th>
                   <th class="celula-acoes">Ações</th>
                 </tr>
               </thead>
@@ -583,6 +594,20 @@
       <div class="form-acoes form-acoes-centro">
         <button type="button" class="btn-secundario" id="btnCancelarNfc">Cancelar</button>
         <button type="button" class="btn-secundario" id="btnFecharModalNfc">Fechar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Captura Biometria -->
+  <div class="modal-overlay" id="modalBiometria" role="dialog" aria-modal="true" aria-labelledby="tituloBiometria" aria-hidden="true">
+    <div class="modal-content">
+      <h3 id="tituloBiometria">Gravar Digital (Biometria)</h3>
+      <p class="texto-suave" id="bioStatus">Iniciando sensor óptico...</p>
+      <div class="nfc-resultado" id="bioPosicao">—</div>
+      <p class="texto-suave" id="bioInstrucao">Apoie o centro do dedo indicador reto sobre o vidro do sensor quando solicitado.</p>
+      <div class="form-acoes form-acoes-centro">
+        <button type="button" class="btn-secundario" id="btnCancelarBiometria">Cancelar</button>
+        <button type="button" class="btn-secundario" id="btnFecharModalBiometria">Fechar</button>
       </div>
     </div>
   </div>

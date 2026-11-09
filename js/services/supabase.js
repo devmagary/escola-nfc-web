@@ -4,7 +4,7 @@
 // =====================================================================
 
 import { obterConfiguracao, normalizarUrlSupabase } from '../lib/config.js';
-import { gerarId, ehUuid } from '../lib/utils.js';
+import { gerarId, ehUuid, normalizarBiometriaId, gerarUidVirtualBiometria } from '../lib/utils.js';
 
 let cliente = null;
 let canalHistorico = null;
@@ -105,6 +105,29 @@ export async function buscarAlunoPorUid(uid) {
     .limit(1);
   if (error) throw error;
   return data?.[0] || null;
+}
+
+export async function buscarAlunoPorBiometria(bioId) {
+  const id = normalizarBiometriaId(bioId);
+  if (id === null) return null;
+
+  try {
+    const { data, error } = await obterCliente()
+      .from('alunos')
+      .select('*')
+      .eq('biometria_id', id)
+      .limit(1);
+    if (!error && data?.[0]) return data[0];
+  } catch (_) {
+    // Se a coluna biometria_id ainda não existir no banco, tenta pelo UID virtual.
+  }
+
+  const uidVirtual = gerarUidVirtualBiometria(id);
+  if (uidVirtual) {
+    return buscarAlunoPorUid(uidVirtual);
+  }
+  return null;
+
 }
 
 export async function salvarAluno(payload, id = null) {

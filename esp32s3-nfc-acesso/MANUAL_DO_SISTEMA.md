@@ -64,6 +64,17 @@ O módulo PN532 possui duas pequenas chavinhas brancas numeradas **1** e **2**. 
 | **SDA** | **GPIO 8** (Barra amarela) | Dados I2C | Linha de comunicação de dados. |
 | **SCL** | **GPIO 9** (Barra amarela) | Clock I2C | Linha de sincronismo do barramento I2C. |
 
+#### 2.3.1. Ligação Opcional do Sensor de Biometria (AS608 / FPM10A / DY50)
+O sistema suporta operação **híbrida** (Cartão NFC + Impressão Digital simultaneamente, ou apenas um dos dois). O chicote do sensor óptico tem 6 vias (numeradas da direita para a esquerda olhando o conector branco por trás), mas apenas os **4 primeiros fios** são usados:
+
+| Pino no Sensor Biométrico | Pino no ESP32-S3 | Função | Explicação |
+| :--- | :--- | :--- | :--- |
+| **Pino 1 (VCC / Vin)** | **3V3** | Alimentação 3.3V | Alimenta o processador DSP e o LED óptico do prisma. |
+| **Pino 2 (TX / TD)** | **GPIO 18** (`BIO_RX_PIN`) | Dados Sensor → ESP | O sensor transmite a leitura para o receptor `RX` da UART1. |
+| **Pino 3 (RX / RD)** | **GPIO 17** (`BIO_TX_PIN`) | Dados ESP → Sensor | O ESP32 envia comandos pelo transmissor `TX` da UART1. |
+| **Pino 4 (GND)** | **GND** | Terra (Negativo) | Referência elétrica comum. |
+| **Pinos 5 e 6 (Tch / Va)** | *Desconectados* | Toque opcional | Não utilizados (a varredura óptica é feita automaticamente pelo Core 0). |
+
 > [!WARNING]
 > **Pinos Protegidos no S3 N16R8:**
 > Os pinos **35, 36 e 37** são dedicados à memória PSRAM de 8 MB da placa. **Nunca ligue nada neles**, sob risco de travamento do microcontrolador.
@@ -213,7 +224,9 @@ O ESP32 trabalha de forma integrada com a aplicação web escolar ([escola-nfc-w
 * `POST /api/remover_aluno`:
   * Remove o UID da lista interna quando o aluno é excluído do sistema.
 * `GET /api/ultimo`:
-  * Fornece à tela da Portaria o último cartão lido com contador de sequência (`seq`) para disparo instantâneo da ficha do aluno.
+  * Fornece à tela da Portaria o último cartão ou digital lida com contador de sequência (`seq`), `metodo` (`"nfc"` ou `"biometria"`) e `bio_id` para disparo instantâneo da ficha do aluno.
+* `POST /api/biometria/iniciar`, `GET /api/biometria/status`, `POST /api/biometria/cancelar` e `POST /api/biometria/excluir`:
+  * Permitem gravar (em 2 toques guiados na tela) ou remover digitais na memória interna do sensor óptico (posições `1` a `300`) diretamente pelo painel web. Alunos sem cartão físico NFC recebem automaticamente o UID virtual `FB:10:00:XX`.
 
 ### Rotas do Painel Web (LittleFS):
 * `GET /painel/`: serve o painel web completo (HTML/CSS/JS) na mesma origem da API. É público (o login é feito no Supabase dentro do painel).

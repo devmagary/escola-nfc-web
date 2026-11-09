@@ -93,6 +93,12 @@ São os melhores pinos para você ligar relés, LEDs, botões, leitores e sensor
 * **Onde ligamos o seu leitor NFC:**
   * **Pino 8:** Linha SDA do I2C (Dados).
   * **Pino 9:** Linha SCL do I2C (Relógio de sincronização).
+* **Onde ligamos o Sensor Biométrico Óptico (AS608 / FPM10A / DY50 — Opcional):**
+  * **Pino 1 (VCC do sensor):** `3.3V` (fileira vermelha)
+  * **Pino 2 (TX do sensor):** `IO18` (RX da UART1 do ESP32-S3)
+  * **Pino 3 (RX do sensor):** `IO17` (TX da UART1 do ESP32-S3)
+  * **Pino 4 (GND do sensor):** `GND` (fileira preta)
+  * **Pinos 5 e 6 do sensor (Touch / 3.3V Touch):** Podem ficar desconectados (livres).
 
 ---
 

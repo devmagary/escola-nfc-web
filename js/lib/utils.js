@@ -38,6 +38,41 @@ export function uidValido(valor) {
   return normalizarUid(valor) !== '';
 }
 
+export function normalizarBiometriaId(valor) {
+  if (valor === null || valor === undefined || valor === '') return null;
+  const limpo = String(valor).trim().replace(/^#/, '');
+  if (!/^\d+$/.test(limpo)) return null;
+  const numero = Number.parseInt(limpo, 10);
+  if (!Number.isInteger(numero) || numero < 1 || numero > 300) return null;
+  return numero;
+}
+
+export function biometriaIdValido(valor) {
+  return normalizarBiometriaId(valor) !== null;
+}
+
+export function gerarUidVirtualBiometria(bioId) {
+  const id = normalizarBiometriaId(bioId);
+  if (id === null) return '';
+  const hi = ((id >> 8) & 0xff).toString(16).toUpperCase().padStart(2, '0');
+  const lo = (id & 0xff).toString(16).toUpperCase().padStart(2, '0');
+  return `FB:10:${hi}:${lo}`;
+}
+
+export function ehUidVirtualBiometria(uid) {
+  const norm = normalizarUid(uid);
+  return /^FB:10:[0-9A-F]{2}:[0-9A-F]{2}$/.test(norm);
+}
+
+export function extrairBiometriaIdDeUid(uid) {
+  const norm = normalizarUid(uid);
+  if (!/^FB:10:[0-9A-F]{2}:[0-9A-F]{2}$/.test(norm)) return null;
+  const partes = norm.split(':');
+  const id = (Number.parseInt(partes[2], 16) << 8) | Number.parseInt(partes[3], 16);
+  return id >= 1 && id <= 300 ? id : null;
+
+}
+
 export function normalizarTelefone(valor) {
   return String(valor || '').replace(/\D/g, '');
 }
@@ -260,6 +295,7 @@ const ALIASES_CSV = {
   nome_responsavel: ['nome_responsavel', 'nome do responsavel', 'responsavel', 'responsável', 'pai', 'mae', 'mãe'],
   telefone_responsavel: ['telefone_responsavel', 'telefone', 'whatsapp', 'celular', 'fone', 'contato'],
   uid_nfc: ['uid_nfc', 'uid', 'cartao', 'cartão', 'tag', 'nfc', 'codigo nfc'],
+  biometria_id: ['biometria_id', 'biometria', 'id biometria', 'digital', 'id digital', 'bio_id'],
   ativo: ['ativo', 'liberado', 'permissao', 'permissão']
 };
 

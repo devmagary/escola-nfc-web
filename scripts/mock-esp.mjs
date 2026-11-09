@@ -53,6 +53,11 @@ const MIME_PAINEL = {
  */
 export const estado = {
   nfc_ok: true,
+  bio_ok: true,
+  /** @type {Set<number>} */
+  digitais: new Set([1, 2, 6, 7]),
+  /** @type {{ id: number, iniciadoEm: number } | null} */
+  cadastroBio: null,
   seq: 0,
   /** @type {{ uid: string, nome: string, cadastrado: boolean, ativo: boolean, lidoEm: number } | null} */
   ultimo: null,
@@ -104,14 +109,51 @@ export function lerTag(uidBruto) {
  * Corpo da resposta de GET /api/ultimo (mesmas chaves do firmware).
  * @returns {Record<string, unknown>}
  */
+export function uidVirtualBio(id) {
+  const hi = ((id >> 8) & 0xff).toString(16).toUpperCase().padStart(2, '0');
+  const lo = (id & 0xff).toString(16).toUpperCase().padStart(2, '0');
+  return `FB:10:${hi}:${lo}`;
+}
+
+export function lerBiometria(idBruto) {
+  const id = Number.parseInt(String(idBruto ?? '').trim(), 10);
+  if (!Number.isInteger(id) || id < 1 || id > 300) {
+    return { ok: false, erro: 'ID de biometria inválido (use de 1 a 300)!' };
+  }
+
+  let cartaoEncontrado = null;
+  for (const c of estado.cartoes.values()) {
+    if (c.bio_id === id || c.uid === uidVirtualBio(id)) {
+      cartaoEncontrado = c;
+      break;
+    }
+  }
+
+  const uid = cartaoEncontrado?.uid ?? uidVirtualBio(id);
+  estado.seq += 1;
+  estado.ultimo = {
+    uid,
+    bio_id: id,
+    metodo: 'biometria',
+    nome: cartaoEncontrado?.nome ?? '',
+    cadastrado: Boolean(cartaoEncontrado),
+    ativo: cartaoEncontrado?.ativo ?? false,
+    lidoEm: Date.now(),
+  };
+
+  return { ok: true, doc: montarUltimo() };
+}
+
 export function montarUltimo() {
   /** @type {Record<string, unknown>} */
-  const doc = { nfc_ok: estado.nfc_ok, seq: estado.seq };
+  const doc = { nfc_ok: estado.nfc_ok, bio_ok: estado.bio_ok, seq: estado.seq };
 
   if (estado.seq > 0 && estado.ultimo) {
     doc.uid = estado.ultimo.uid;
     doc.nome = estado.ultimo.nome;
     doc.cadastrado = estado.ultimo.cadastrado;
+    doc.metodo = estado.ultimo.metodo ?? 'nfc';
+    if (estado.ultimo.bio_id) doc.bio_id = estado.ultimo.bio_id;
     doc.ha = Math.max(0, Math.floor((Date.now() - estado.ultimo.lidoEm) / 1000));
   }
 
@@ -135,7 +177,11 @@ export function normalizarCartao(entrada) {
   const nome = typeof dados.nome === 'string' ? dados.nome.trim() : '';
   const ativo = dados.ativo === true || dados.ativo === 'true' || dados.ativo === 1 || dados.ativo === '1';
 
-  return { ok: true, cartao: { uid, nome: nome || 'Aluno', ativo } };
+  const bioRaw = dados.bio_id !== undefined && dados.bio_id !== null && dados.bio_id !== '' ? Number.parseInt(String(dados.bio_id), 10) : null;
+  const bio_id = Number.isInteger(bioRaw) && bioRaw >= 1 && bioRaw <= 300 ? bioRaw : undefined;
+  const cartao = { uid, nome: nome || 'Aluno', ativo };
+  if (bio_id !== undefined) cartao.bio_id = bio_id;
+  return { ok: true, cartao };
 }
 
 /**
@@ -414,6 +460,9 @@ export async function handler(req, res) {
         wifi_faixas: '2.4 GHz',
         bluetooth: true,
         nfc: estado.nfc_ok,
+        bio: estado.bio_ok,
+        bio_ok: estado.bio_ok,
+        bio_total: estado.digitais.size,
         psram: 8,
         flash: 16,
         fs: 'LittleFS (mock)',
@@ -440,6 +489,119 @@ export async function handler(req, res) {
         ...resultado.doc,
         cartao: estado.ultimo,
       });
+      return;
+    }
+
+    if (metodo === 'GET' && rota === '/mock/bio') {
+      const resultado = lerBiometria(url.searchParams.get('id') ?? '');
+      if (!resultado.ok) {
+        enviarErro(res, 400, resultado.erro);
+        return;
+      }
+      enviarJson(res, 200, {
+        ok: true,
+        ...resultado.doc,
+        cartao: estado.ultimo,
+      });
+      return;
+    }
+
+    if (metodo === 'POST' && rota === '/api/biometria/iniciar') {
+      const corpo = await lerCorpo(req);
+      if (!corpo.ok) {
+        enviarErro(res, 400, corpo.erro);
+        return;
+      }
+      const id = Number.parseInt(String(corpo.dados?.id ?? '').trim(), 10);
+      if (!Number.isInteger(id) || id < 1 || id > 300) {
+        enviarErro(res, 400, 'ID de biometria inválido (use de 1 a 300).');
+        return;
+      }
+      estado.cadastroBio = { id, iniciadoEm: Date.now() };
+      enviarJson(res, 200, {
+        ok: true,
+        id,
+        etapa: 'aguardando_dedo_1',
+        mensagem: `Posição #${id}: encoste o dedo no sensor óptico (1ª leitura)...`,
+      });
+      return;
+    }
+
+    if (metodo === 'GET' && rota === '/api/biometria/status') {
+      if (!estado.cadastroBio) {
+        enviarJson(res, 200, {
+          ok: true,
+          ativo: false,
+          etapa: 'inativo',
+          id: 0,
+          mensagem: 'Nenhum cadastro biométrico em andamento.',
+        });
+        return;
+      }
+      const { id, iniciadoEm } = estado.cadastroBio;
+      const decorrido = Date.now() - iniciadoEm;
+      if (decorrido < 600) {
+        enviarJson(res, 200, {
+          ok: true,
+          ativo: true,
+          id,
+          etapa: 'aguardando_dedo_1',
+          mensagem: `Posição #${id}: encoste o dedo no sensor óptico (1ª leitura)...`,
+        });
+        return;
+      }
+      if (decorrido < 1200) {
+        enviarJson(res, 200, {
+          ok: true,
+          ativo: true,
+          id,
+          etapa: 'remova_dedo',
+          mensagem: '1ª leitura capturada! Retire o dedo do sensor...',
+        });
+        return;
+      }
+      if (decorrido < 1800) {
+        enviarJson(res, 200, {
+          ok: true,
+          ativo: true,
+          id,
+          etapa: 'aguardando_dedo_2',
+          mensagem: 'Encoste o MESMO dedo novamente para confirmar (2ª leitura)...',
+        });
+        return;
+      }
+      estado.digitais.add(id);
+      estado.cadastroBio = null;
+      enviarJson(res, 200, {
+        ok: true,
+        ativo: false,
+        id,
+        uid_virtual: uidVirtualBio(id),
+        etapa: 'concluido',
+        mensagem: `Biometria gravada com sucesso na posição #${id}!`,
+      });
+      return;
+    }
+
+    if (metodo === 'POST' && rota === '/api/biometria/cancelar') {
+      estado.cadastroBio = null;
+      enviarJson(res, 200, { ok: true, cancelado: true });
+      return;
+    }
+
+    if (metodo === 'POST' && rota === '/api/biometria/excluir') {
+      const corpo = await lerCorpo(req);
+      if (!corpo.ok) {
+        enviarErro(res, 400, corpo.erro);
+        return;
+      }
+      const id = Number.parseInt(String(corpo.dados?.id ?? url.searchParams.get('id') ?? '').trim(), 10);
+      if (!Number.isInteger(id) || id < 1 || id > 300) {
+        enviarErro(res, 400, 'ID de biometria inválido (use de 1 a 300).');
+        return;
+      }
+      const removido = estado.digitais.delete(id);
+      enviarJson(res, 200, { ok: true, id, removido });
       return;
     }
 

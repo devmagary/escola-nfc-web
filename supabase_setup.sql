@@ -404,6 +404,24 @@ CREATE INDEX IF NOT EXISTS idx_alunos_nome ON public.alunos(nome_completo);
 
 -- Garante a nova coluna também em bancos criados por versões anteriores.
 ALTER TABLE public.alunos ADD COLUMN IF NOT EXISTS foto_path TEXT;
+ALTER TABLE public.alunos ADD COLUMN IF NOT EXISTS biometria_id INTEGER;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'alunos_biometria_id_faixa'
+    ) THEN
+        ALTER TABLE public.alunos
+          ADD CONSTRAINT alunos_biometria_id_faixa
+          CHECK (biometria_id IS NULL OR (biometria_id >= 1 AND biometria_id <= 300));
+    END IF;
+END;
+$$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_alunos_biometria_id
+  ON public.alunos(biometria_id)
+  WHERE biometria_id IS NOT NULL;
 
 -- Backfill de foto_path a partir de foto_url:
 --   * Só extrai quando a URL aponta para o bucket "fotos-alunos".
