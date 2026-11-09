@@ -96,8 +96,10 @@ button:disabled{opacity:0.5;cursor:not-allowed}
   <div class="chips">
     <span class="chip" id="chipUptime">Uptime: 0s</span>
     <span class="chip" id="chipNfc">NFC: ...</span>
+    <a href="/wifi" class="nav-link">📶 Wi-Fi</a>
     <a href="/ota" class="nav-link">⬆️ OTA</a>
     <a href="/" class="nav-link">🏠 Painel</a>
+    <a href="/api/diagnostico" class="nav-link" target="_blank" rel="noopener">🩺 Diagnóstico</a>
   </div>
 </header>
 
@@ -108,6 +110,7 @@ button:disabled{opacity:0.5;cursor:not-allowed}
   <button type="button" onclick="enviarComando('status')">📊 Diagnóstico</button>
   <button type="button" id="btnScroll" onclick="alternarScroll()">⏸️ Pausar Rolagem</button>
   <button type="button" onclick="limparTela()">🧹 Limpar Tela</button>
+  <button type="button" onclick="enviarComando('reset_nfc')">🔄 Reiniciar leitor NFC</button>
   <button type="button" class="err" onclick="enviarComando('reboot')">🔄 Reiniciar ESP32</button>
 </div>
 
@@ -335,8 +338,9 @@ button:disabled{opacity:0.5;cursor:not-allowed}
   <div class="alerta" id="alertaBox"></div>
 
   <div class="links">
-    <a href="/console">📟 Ir para Console Serial</a>
-    <a href="/">🏠 Voltar ao Painel Web</a>
+    <a href="/console">📟 Console Serial</a>
+    <a href="/wifi">📶 Configurar Wi-Fi</a>
+    <a href="/">🏠 Painel Web</a>
   </div>
 </div>
 

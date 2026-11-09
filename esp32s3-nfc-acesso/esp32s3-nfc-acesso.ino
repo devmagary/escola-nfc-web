@@ -118,7 +118,13 @@ const char* ARQ_HISTORICO = "/historico.json";
 #define MAX_HISTORICO_LOG 50
 
 // Versão desta build de diagnóstico (aparece em /api/status e /api/diagnostico).
-#define FW_VERSAO "2.0.0-diag"
+#define FW_VERSAO "2.1.3"
+
+// Watchdog do leitor: sem nenhuma leitura por 15 min, tenta um reinício
+// completo (que também cobre corredor vazio, sem custo perceptível); no
+// máximo uma tentativa a cada 10 min para não ciclar.
+#define NFC_WATCHDOG_OCIOSO_MS    (15UL * 60UL * 1000UL)
+#define NFC_WATCHDOG_INTERVALO_MS (10UL * 60UL * 1000UL)
 
 // Limiares do diagnóstico de desempenho (ms). Eventos acima disso são
 // registrados no buffer circular e, com rate-limit, no console.
@@ -163,10 +169,16 @@ struct TentativaWifi {
 uint32_t wifiReiniciarEm = 0;   // 0 = nenhum reinício agendado
 String   wifiIpNovo      = "";
 
-// Cache da varredura de redes exibida na página /wifi
+// Cache da varredura de redes exibida na página /wifi.
+// Invariante: estes campos são tocados SOMENTE pelo Core 1 (loop + rotas HTTP).
 String   scanCacheJson   = "[]";
 uint32_t scanCacheMs     = 0;
 bool     scanCacheValido = false;
+// Varredura assíncrona: a página consulta /api/wifi/scan até scanning=false.
+// Só é permitida no modo AP (em STA a rede já está escolhida e trocar exige
+// "Esquecer rede"), então o servidor web nunca fica 2,8 s bloqueado.
+bool     wifiScanEmAndamento = false;
+uint32_t wifiScanInicioMs = 0;
 
 // Ponteiro universal para o sistema de arquivos (LittleFS ou FFat)
 fs::FS* fsPtr = nullptr;
@@ -185,6 +197,22 @@ bool    painelUploadFalhou = false;
 SemaphoreHandle_t  travaDados;
 SemaphoreHandle_t  travaLog = nullptr;
 SemaphoreHandle_t  travaDiag = nullptr;
+// Protege o "último cartão" (Strings escritas no Core 0 e lidas pelo Core 1).
+SemaphoreHandle_t  travaUltimo = nullptr;
+// Evita que uma gravação na SPI flash comece no meio de uma transação I2C do
+// PN532: gravar na flash desliga o cache para os DOIS núcleos, e a transação
+// interrompida podia deixar o módulo sem responder até o próximo reset.
+SemaphoreHandle_t  travaNfcFlash = nullptr;
+
+// Dono único do barramento I2C/PN532: somente a tarefa NFC (Core 0) fala com o
+// módulo. O Core 1 apenas registra um pedido de diagnóstico e lê o resultado
+// publicado, evitando que duas tarefas intercalem comando/resposta do PN532.
+enum PedidoNfc : uint8_t { NFC_SEM_PEDIDO = 0, NFC_PEDIR_PING = 1 };
+SemaphoreHandle_t  travaResultadoNfc = nullptr;
+volatile uint8_t   pedidoNfcPendente = NFC_SEM_PEDIDO;
+volatile uint32_t  pedidoNfcSeq = 0;
+volatile uint32_t  pedidoNfcAtendido = 0;
+String             resultadoPedidoNfc = "";
 
 // Diagnóstico de desempenho / engasgos.
 struct EventoDiag {
@@ -209,6 +237,8 @@ volatile uint32_t diagEngasgos = 0;
 volatile uint32_t diagUltimoLoopMs = 0;
 volatile uint32_t diagUltimoLogMs = 0;
 volatile uint32_t diagNfcStackMin = 0;
+// Tempo da última validação de cartão (leitura do PN532 + consulta em RAM).
+volatile uint32_t nfcUltimaDuracaoMs = 0;
 uint32_t diagUltimoHeartbeatMs = 0;
 
 // Informações do último cartão lido
@@ -232,6 +262,18 @@ String            bioCadastroMsg = "";
 uint32_t          bioCadastroInicioMs = 0;
 bool     modoAP = false;
 bool     ntpSincronizado = false;
+// Só o Core 0 (tarefa NFC) mexe neste contador.
+uint8_t  falhasHeartbeatNfc = 0;
+
+// Recuperação do leitor. O PN532 pode ficar "zumbi" após uma reconexão: responde
+// ao GetFirmwareVersion (LED azul normal) mas não lê cartão. Contadores e
+// pedidos usados pelo watchdog, pelo console e pelo /api/status.
+volatile bool pedidoReinicioNfc = false; // solicitado pelo Core 1 (console/página)
+uint32_t nfcReinicios = 0;               // reinícios completos executados
+uint32_t nfcReconexoes = 0;              // reconexões bem-sucedidas após queda
+uint32_t nfcUltimoReinicioMs = 0;
+uint32_t nfcUltimaLeituraMs = 0;
+bool     nfcSamOk = false;               // último SAMConfig (arma o RF)
 
 // Controle de cor temporária do LED RGB
 // volatile: o Core 0 (NFC) escreve e o Core 1 (loop/servidor) lê.
@@ -248,6 +290,20 @@ uint32_t saidaInicio = 0;
 // =====================================================================
 
 void aplicarCorLed(uint8_t r, uint8_t g, uint8_t b) {
+  // O WS2812 desliga interrupções durante o envio. Antes isto rodava a cada
+  // iteração do loop (~500x/s) mesmo com a cor repetida; agora só envia quando
+  // a cor muda e no máximo ~30x por segundo (suficiente para a respiração).
+  static uint8_t  ultimoR = 255, ultimoG = 255, ultimoB = 255;
+  static uint32_t ultimoEnvioMs = 0;
+
+  if (r == ultimoR && g == ultimoG && b == ultimoB) return;
+  uint32_t agora = millis();
+  if (agora - ultimoEnvioMs < 33) return;
+
+  ultimoR = r;
+  ultimoG = g;
+  ultimoB = b;
+  ultimoEnvioMs = agora;
   rgb.setPixelColor(0, rgb.Color(r, g, b));
   rgb.show();
 }
@@ -328,7 +384,9 @@ void iniciarNTP() {
 
 String obterDataHoraAtual() {
   struct tm infoTempo;
-  if (!getLocalTime(&infoTempo, 50)) {
+  // Timeout 0: só consulta o relógio. Com 50 ms esta função esperava o SNTP
+  // sincronizar e bloqueava até 50 ms em cada log (causa dos "engasgos").
+  if (!getLocalTime(&infoTempo, 0)) {
     return ""; // Sem sincronismo NTP ainda
   }
   char buffer[25];
@@ -486,43 +544,69 @@ void imprimirDiagnosticoFlash() {
 
   Serial.println("\n  Tentando montar o sistema de arquivos para os cartões...");
 
-  // 1. Tenta montar LittleFS (se a partição for do tipo SPIFFS/LittleFS)
-  if (LittleFS.begin(true)) {
-    fsPtr = &LittleFS;
-    nomeFsAtivo = "LittleFS";
-    Serial.println("  [SUCESSO] Sistema LittleFS montado e pronto para uso!");
-  } 
-  // 2. Se falhar ou a partição for FATFS (ex: '16M Flash (3MB APP/9.9MB FATFS)'), tenta FFat
-  else if (FFat.begin(true)) {
-    fsPtr = &FFat;
-    nomeFsAtivo = "FFat (FATFS)";
-    Serial.println("  [SUCESSO] Partição FATFS detectada e montada com sucesso via FFat!");
-  } 
-  // 3. Se nenhuma deu certo, imprime instrução direta
-  else {
-    fsPtr = nullptr;
-    nomeFsAtivo = "Indisponível";
-    Serial.println("\n  [ERRO CRÍTICO] Não foi possível montar nem LittleFS nem FFat.");
-    Serial.println("  Motivo provável: O esquema de partição selecionado na Arduino IDE não contém partição de dados.");
-    Serial.println("  COMO RESOLVER EM 10 SEGUNDOS:");
-    Serial.println("  1. No menu superior da Arduino IDE, vá em: Ferramentas -> Partition Scheme");
-    Serial.println("  2. Selecione: 'Default 4MB with spiffs' OU '8M with spiffs' OU 'ESP SR 16M (3MB APP/6MB SPIFFS)'");
-    Serial.println("  3. Clique novamente no botão de Upload.");
+  // Monta primeiro a partição que realmente existe na placa. Antes o código
+  // chamava LittleFS.begin(true) sempre (mesmo sem partição "spiffs"), o que
+  // imprimia o erro "partition spiffs could not be found" a cada boot e, em
+  // caso de falha, FORMATAVA a flash sem perguntar. Agora tenta montar sem
+  // formatar e só formata como último recurso, avisando no console.
+  auto montarFs = [&](bool usarLittleFs) -> bool {
+    if (usarLittleFs) {
+      if (LittleFS.begin(false)) { fsPtr = &LittleFS; nomeFsAtivo = "LittleFS"; return true; }
+      Serial.println("  [AVISO] LittleFS nao montou; os dados atuais NAO foram apagados.");
+      Serial.println("  [AVISO] Tentando formatar a particao LittleFS (dados anteriores serao perdidos)...");
+      if (LittleFS.begin(true)) { fsPtr = &LittleFS; nomeFsAtivo = "LittleFS (formatado)"; return true; }
+      return false;
+    }
+    if (FFat.begin(false)) { fsPtr = &FFat; nomeFsAtivo = "FFat (FATFS)"; return true; }
+    Serial.println("  [AVISO] FATFS nao montou; os dados atuais NAO foram apagados.");
+    Serial.println("  [AVISO] Tentando formatar a particao FATFS (dados anteriores serao perdidos)...");
+    if (FFat.begin(true)) { fsPtr = &FFat; nomeFsAtivo = "FFat (FATFS formatado)"; return true; }
+    return false;
+  };
+
+  bool montou = false;
+  if (temFat && !temSpiffs) {
+    montou = montarFs(false);
+  } else if (temSpiffs && !temFat) {
+    montou = montarFs(true);
+  } else {
+    montou = montarFs(true) || montarFs(false);
+  }
+
+  if (montou) {
+    Serial.println("  [SUCESSO] Partição de dados montada com sucesso!");
+    Serial.printf("  Sistema de arquivos ativo: %s\n", nomeFsAtivo);
     Serial.println("--------------------------------------------------\n");
     return;
   }
 
-  Serial.printf("  Sistema de arquivos ativo: %s\n", nomeFsAtivo);
+  // Nenhuma partição de dados montou: imprime instrução direta
+  fsPtr = nullptr;
+  nomeFsAtivo = "Indisponível";
+  Serial.println("\n  [ERRO CRÍTICO] Não foi possível montar nem LittleFS nem FFat.");
+  Serial.println("  Motivo provável: O esquema de partição selecionado na Arduino IDE não contém partição de dados.");
+  Serial.println("  COMO RESOLVER EM 10 SEGUNDOS:");
+  Serial.println("  1. No menu superior da Arduino IDE, vá em: Ferramentas -> Partition Scheme");
+  Serial.println("  2. Selecione: 'Default 4MB with spiffs' OU '8M with spiffs' OU 'ESP SR 16M (3MB APP/6MB SPIFFS)'");
+  Serial.println("  3. Clique novamente no botão de Upload.");
   Serial.println("--------------------------------------------------\n");
 }
 
 bool salvarJsonNoArquivo(const char* caminho, const JsonDocument& doc) {
   if (!fsPtr) return false;
   uint32_t inicio = micros();
+
+  if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
+  bool gravou = false;
   File arq = fsPtr->open(caminho, "w");
-  if (!arq) return false;
-  serializeJson(doc, arq);
-  arq.close();
+  if (arq) {
+    serializeJson(doc, arq);
+    arq.close();
+    gravou = true;
+  }
+  if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
+
+  if (!gravou) return false;
 
   uint32_t durMs = (micros() - inicio) / 1000;
   if (durMs > diagFsMaxMs) diagFsMaxMs = durMs;
@@ -542,6 +626,212 @@ bool carregarJsonDoArquivo(const char* caminho, JsonDocument& doc) {
   if (durMs > diagFsMaxMs) diagFsMaxMs = durMs;
   if (durMs >= DIAG_LIMIAR_FS_MS) registrarEventoDiag("FS", durMs, String("ler ") + caminho);
   return (erro == DeserializationError::Ok);
+}
+
+// =====================================================================
+// Cache em RAM de cartões e histórico (na PSRAM, que ficava ociosa)
+//
+// Antes, CADA aproximação de cartão lia cartoes.json da flash e o histórico
+// era lido+reescrito inteiro. Com a base sincronizada do Supabase isso vira
+// centenas de ms por leitura, segurando a trava de dados. Agora a flash só é
+// tocada no boot e nas alterações; a validação do cartão é uma busca em RAM.
+// =====================================================================
+
+struct CartaoRam {
+  char     uid[40];   // UID de 10 bytes formatado ("AA:..:JJ") ocupa 29 caracteres
+  char     nome[128];
+  bool     ativo;
+  uint16_t bio_id;
+};
+
+struct HistoricoRam {
+  char     uid[40];
+  char     nome[128];
+  char     dh[24];
+  uint32_t tempo;
+  uint8_t  res;
+};
+
+CartaoRam*   cartoesRam = nullptr;
+uint16_t     cartoesRamTotal = 0;
+uint16_t     cartoesRamCapacidade = 0;
+bool         cartoesRamValido = false;
+
+HistoricoRam* historicoRam = nullptr;
+uint16_t      historicoRamTotal = 0;
+bool          historicoSujo = false;
+uint32_t      historicoUltimaGravacaoMs = 0;
+uint32_t      historicoUltimoEventoMs = 0; // último cartão: grava só quando o fluxo parar
+uint32_t      historicoSeqGerado = 0; // detecta eventos novos durante a gravação
+
+void* alocarRamPreferindoPsram(size_t bytes) {
+  void* p = nullptr;
+  if (ESP.getPsramSize() > 0) p = ps_malloc(bytes);
+  if (!p) p = malloc(bytes);
+  return p;
+}
+
+// (Re)constrói o índice de cartões a partir de um documento já carregado.
+bool indiceDoDocumento(JsonDocument& doc) {
+  JsonArray arr = doc.as<JsonArray>();
+  uint16_t necessario = (uint16_t)arr.size() + 8;
+
+  // A capacidade só cresce: cadastrar/remover um cartão não realoca a lista
+  // inteira a cada edição. Se faltar memória, mantém o ponteiro antigo e marca
+  // o índice como inválido (a validação volta a ler a flash, que já foi gravada).
+  if (necessario > cartoesRamCapacidade) {
+    CartaoRam* novo = (CartaoRam*)alocarRamPreferindoPsram(sizeof(CartaoRam) * necessario);
+    if (!novo) {
+      cartoesRamValido = false;
+      Serial.println("[RAM] Sem memoria para o indice de cartoes; mantendo a leitura da Flash.");
+      return false;
+    }
+    if (cartoesRam) free(cartoesRam);
+    cartoesRam = novo;
+    cartoesRamCapacidade = necessario;
+  }
+
+  cartoesRamTotal = 0;
+  for (JsonObject c : arr) {
+    if (cartoesRamTotal >= cartoesRamCapacidade) break;
+    CartaoRam& item = cartoesRam[cartoesRamTotal++];
+    strlcpy(item.uid, c["uid"].as<String>().c_str(), sizeof(item.uid));
+    strlcpy(item.nome, c["nome"].as<String>().c_str(), sizeof(item.nome));
+    item.ativo = c["ativo"].as<bool>();
+    item.bio_id = c["bio_id"] | 0;
+  }
+  cartoesRamValido = true;
+  return true;
+}
+
+bool reconstruirIndiceCartoes() {
+  if (!fsPtr) { cartoesRamValido = false; return false; }
+  JsonDocument doc;
+  if (!carregarJsonDoArquivo(ARQ_CARTOES, doc)) { cartoesRamValido = false; return false; }
+  return indiceDoDocumento(doc);
+}
+
+// Busca sem tocar na flash. Retorna false se o UID não estiver cadastrado.
+bool consultarCartaoRam(const String& uid, bool* ativo, String* nome) {
+  if (!cartoesRamValido || !cartoesRam) return false;
+  for (uint16_t i = 0; i < cartoesRamTotal; i++) {
+    if (strcasecmp(cartoesRam[i].uid, uid.c_str()) == 0) {
+      if (ativo) *ativo = cartoesRam[i].ativo;
+      if (nome) *nome = cartoesRam[i].nome;
+      return true;
+    }
+  }
+  return false;
+}
+
+void garantirHistoricoRam() {
+  if (historicoRam) return;
+  // Se a alocação falhar, evita tentar de novo a cada cartão (backoff de 60 s).
+  static uint32_t ultimaTentativaMs = 0;
+  if (ultimaTentativaMs != 0 && millis() - ultimaTentativaMs < 60000) return;
+  ultimaTentativaMs = millis();
+
+  historicoRam = (HistoricoRam*)alocarRamPreferindoPsram(sizeof(HistoricoRam) * MAX_HISTORICO_LOG);
+  if (!historicoRam) {
+    Serial.println("[RAM] Sem memoria para o historico; voltando a gravar direto na Flash.");
+  }
+}
+
+void carregarHistoricoRam() {
+  garantirHistoricoRam();
+  if (!historicoRam || !fsPtr) return;
+  historicoRamTotal = 0;
+
+  JsonDocument doc;
+  if (!carregarJsonDoArquivo(ARQ_HISTORICO, doc)) return;
+  JsonArray arr = doc.as<JsonArray>();
+  for (JsonObject item : arr) {
+    if (historicoRamTotal >= MAX_HISTORICO_LOG) break;
+    HistoricoRam& h = historicoRam[historicoRamTotal++];
+    strlcpy(h.uid, item["uid"].as<String>().c_str(), sizeof(h.uid));
+    strlcpy(h.nome, item["nome"].as<String>().c_str(), sizeof(h.nome));
+    strlcpy(h.dh, item["dh"].as<String>().c_str(), sizeof(h.dh));
+    h.tempo = item["tempo"].as<uint32_t>();
+    h.res = item["res"].as<uint8_t>();
+  }
+}
+
+// Insere no início da lista circular (mais novo primeiro), sem gravar na flash.
+void adicionarHistoricoRam(const String& uid, const String& nome, uint8_t res) {
+  if (!historicoRam) {
+    garantirHistoricoRam();
+    if (!historicoRam) return;
+    // A RAM passou a existir agora: traz o histórico que estava na flash para
+    // não sobrescrevê-lo com um único evento na próxima gravação.
+    carregarHistoricoRam();
+  }
+
+  uint16_t total = historicoRamTotal;
+  if (total < MAX_HISTORICO_LOG) total++;
+  for (int i = (int)total - 1; i > 0; i--) historicoRam[i] = historicoRam[i - 1];
+
+  HistoricoRam& h = historicoRam[0];
+  strlcpy(h.uid, uid.c_str(), sizeof(h.uid));
+  strlcpy(h.nome, nome.c_str(), sizeof(h.nome));
+  String dh = obterDataHoraAtual();
+  strlcpy(h.dh, dh.c_str(), sizeof(h.dh));
+  h.tempo = millis();
+  h.res = res;
+
+  historicoRamTotal = total;
+  historicoSeqGerado++;
+  historicoSujo = true;
+  historicoUltimoEventoMs = millis();
+  if (historicoUltimaGravacaoMs == 0) historicoUltimaGravacaoMs = millis();
+}
+
+// Grava o histórico no máximo a cada 1,5 s (agrupa acessos seguidos e poupa a
+// flash). Roda no Core 1; a cópia é feita sob a trava de dados.
+void gravarHistoricoInterno(bool forcar) {
+  if (!historicoSujo || !historicoRam || !fsPtr) return;
+  if (!forcar) {
+    // Espera o "movimento" acabar: um cartão isolado ou uma fila de alunos vira
+    // UMA gravação (386 ms cada nesta flash), e não uma por cartão.
+    if (millis() - historicoUltimoEventoMs < 3000) return;
+    if (millis() - historicoUltimaGravacaoMs < 1500) return;
+  }
+
+  JsonDocument doc;
+  uint32_t seqDaCopia;
+
+  xSemaphoreTake(travaDados, portMAX_DELAY);
+  seqDaCopia = historicoSeqGerado;
+  JsonArray arr = doc.to<JsonArray>();
+  for (uint16_t i = 0; i < historicoRamTotal; i++) {
+    JsonObject item = arr.add<JsonObject>();
+    item["uid"] = historicoRam[i].uid;
+    item["nome"] = historicoRam[i].nome;
+    item["res"] = historicoRam[i].res;
+    item["dh"] = historicoRam[i].dh;
+    item["tempo"] = historicoRam[i].tempo;
+  }
+  xSemaphoreGive(travaDados);
+
+  bool gravou = salvarJsonNoArquivo(ARQ_HISTORICO, doc);
+
+  // Só considera "limpo" se a gravação deu certo E nenhum evento novo entrou
+  // enquanto o arquivo era escrito. Antes o flag caía antes da gravação, então
+  // uma falha de FS perdia os eventos daquela janela para sempre.
+  xSemaphoreTake(travaDados, portMAX_DELAY);
+  if (gravou && historicoSeqGerado == seqDaCopia) historicoSujo = false;
+  xSemaphoreGive(travaDados);
+
+  historicoUltimaGravacaoMs = millis();
+}
+
+// Chamado pelo loop: respeita a janela de 1,5 s.
+void gravarHistoricoSePreciso() {
+  gravarHistoricoInterno(false);
+}
+
+// Usado antes de reiniciar: não perde os últimos acessos da janela de 1,5 s.
+void gravarHistoricoAgora() {
+  gravarHistoricoInterno(true);
 }
 
 void inicializarArquivosDados() {
@@ -574,15 +864,40 @@ void inicializarArquivosDados() {
     doc.to<JsonArray>();
     salvarJsonNoArquivo(ARQ_HISTORICO, doc);
   }
+
+  // Carrega uma vez para a PSRAM: daqui em diante a leitura de cartão e a
+  // listagem do histórico não tocam mais na flash.
+  reconstruirIndiceCartoes();
+  carregarHistoricoRam();
+  String resumoRam = "[RAM] Indice de cartoes: " + String(cartoesRamTotal) +
+                     " | historico: " + String(historicoRamTotal) + " evento(s)";
+  Serial.println(resumoRam);
+  logSerial(resumoRam, "info"); // aparece também no console web (/console)
 }
 
 void registrarAcessoNoHistorico(String uid, String nome, uint8_t res) {
   if (!fsPtr) return;
+  garantirHistoricoRam();
+  if (historicoRam) {
+    adicionarHistoricoRam(uid, nome, res);
+    return;
+  }
+
+  // Fallback sem RAM (PSRAM/heap esgotados): grava direto na flash.
   JsonDocument doc;
   carregarJsonDoArquivo(ARQ_HISTORICO, doc);
-  JsonArray arr = doc.as<JsonArray>();
 
-  JsonObject novo = doc.createNestedObject();
+  // doc.as<JsonArray>() fica nulo se o arquivo ainda não existe ou está corrompido.
+  JsonArray arr = doc.is<JsonArray>() ? doc.as<JsonArray>() : doc.to<JsonArray>();
+
+  // Monta a lista nova (evento atual primeiro) diretamente num documento
+  // separado. O código anterior anexava o objeto ao array carregado e depois o
+  // removia (createNestedObject + arr.remove); funcionava, mas dependia de API
+  // obsoleta e fazia duas cópias. Assim fica direto e sem ambiguidade.
+  JsonDocument docNovo;
+  JsonArray arrNovo = docNovo.to<JsonArray>();
+
+  JsonObject novo = arrNovo.add<JsonObject>();
   novo["uid"] = uid;
   novo["nome"] = nome;
   novo["res"] = res;
@@ -590,10 +905,6 @@ void registrarAcessoNoHistorico(String uid, String nome, uint8_t res) {
   novo["dh"] = dh.isEmpty() ? "" : dh;
   novo["tempo"] = millis();
 
-  arr.remove(novo);
-  JsonDocument docNovo;
-  JsonArray arrNovo = docNovo.to<JsonArray>();
-  arrNovo.add(novo);
   for (size_t i = 0; i < arr.size() && arrNovo.size() < MAX_HISTORICO_LOG; i++) {
     arrNovo.add(arr[i]);
   }
@@ -625,6 +936,31 @@ void atualizarSaidaFechadura() {
 // Lógica de Validação e Leitura NFC (Executada no Core 0)
 // =====================================================================
 
+// Libera um barramento I2C preso: o PN532 pode segurar SDA em LOW depois de uma
+// transação interrompida. São 9 pulsos de clock + STOP, o procedimento padrão.
+void recuperarBarramentoI2C() {
+  pinMode(SDA_PIN, INPUT_PULLUP);
+  pinMode(SCL_PIN, OUTPUT);
+  digitalWrite(SCL_PIN, HIGH);
+  delayMicroseconds(5);
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(SCL_PIN, LOW);
+    delayMicroseconds(5);
+    digitalWrite(SCL_PIN, HIGH);
+    delayMicroseconds(5);
+  }
+  pinMode(SDA_PIN, OUTPUT);
+  digitalWrite(SDA_PIN, LOW);
+  delayMicroseconds(5);
+  digitalWrite(SCL_PIN, HIGH);
+  delayMicroseconds(5);
+  digitalWrite(SDA_PIN, HIGH);
+  delayMicroseconds(5);
+  pinMode(SDA_PIN, INPUT_PULLUP);
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setTimeOut(50);
+}
+
 bool iniciarPN532(bool verboso) {
   nfc.begin();
   uint32_t versiondata = nfc.getFirmwareVersion();
@@ -634,31 +970,97 @@ bool iniciarPN532(bool verboso) {
       Serial.println("1. Verifique se Chave 1=ON e Chave 2=OFF no modulo.");
       Serial.println("2. Verifique se SDA esta no pino 8 e SCL no pino 9.");
     }
+    nfcSamOk = false;
     return false;
   }
   if (verboso) {
     Serial.printf("PN532 Detectado! Firmware %d.%d\n", (versiondata >> 16) & 0xFF, (versiondata >> 8) & 0xFF);
   }
-  nfc.SAMConfig();
+  // O SAMConfig arma o campo de RF. Guardamos o resultado para o diagnóstico e
+  // para o reinício completo exigir versão + SAM (o boot continua aceitando só
+  // a versão, para não marcar como ausente um módulo que responde).
+  bool samOk = false;
+  for (uint8_t tentativa = 0; tentativa < 3 && !samOk; tentativa++) {
+    samOk = nfc.SAMConfig();
+    if (!samOk) delay(80);
+  }
+  nfcSamOk = samOk;
+  if (verboso && !samOk) {
+    Serial.println("Aviso: PN532 respondeu a versao, mas o SAMConfig falhou (RF pode nao armar).");
+  }
   return true;
+}
+
+// Reinício completo do leitor, replicando o que o boot faz. O caminho antigo
+// chamava Wire.begin() sem Wire.end() e aceitava o módulo apenas pela versão:
+// depois de reconectar o sensor ele podia responder ao GetFirmwareVersion mas
+// não ler cartão (estado "zumbi"). Aqui o barramento é fechado, recuperado e
+// reaberto; a versão é conferida com retries e o SAMConfig (que arma o RF)
+// precisa passar para o leitor ser considerado saudável.
+bool reiniciarLeitorCompleto(bool verboso) {
+  if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
+
+  Wire.end();
+  delay(30);
+  recuperarBarramentoI2C(); // wiggle de 9 clocks + Wire.begin + timeout
+
+  nfc.begin();              // Adafruit: RST (GPIO5, se ligado) + Wire.begin
+
+  bool versaoOk = false;
+  for (uint8_t tentativa = 0; tentativa < 3 && !versaoOk; tentativa++) {
+    if (nfc.getFirmwareVersion()) versaoOk = true;
+    else delay(150);
+  }
+
+  bool samOk = false;
+  if (versaoOk) {
+    for (uint8_t tentativa = 0; tentativa < 3 && !samOk; tentativa++) {
+      samOk = nfc.SAMConfig();
+      if (!samOk) delay(150);
+    }
+  }
+
+  nfcSamOk = samOk;
+  nfcUltimoReinicioMs = millis();
+  nfcReinicios++;
+  if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
+
+  if (verboso) {
+    Serial.printf("[NFC] reinicio completo: versao=%s sam=%s (total %lu)\n",
+                  versaoOk ? "ok" : "falhou",
+                  samOk ? "ok" : "falhou",
+                  (unsigned long)nfcReinicios);
+  }
+  return versaoOk && samOk;
 }
 
 void processarLeituraNfc(String uidFormatado) {
   uint32_t inicioUs = micros();
-  xSemaphoreTake(travaDados, portMAX_DELAY);
 
+  // O "último cartão" é lido pelo Core 1 (/api/ultimo): Strings exigem trava.
+  xSemaphoreTake(travaUltimo, portMAX_DELAY);
   ultimoUidLido = uidFormatado;
   ultimoMetodoLido = "nfc";
   ultimoBioIdLido = 0;
   ultimoLidoMs = millis();
   ultimoSeq++;
+  xSemaphoreGive(travaUltimo);
+
+  xSemaphoreTake(travaDados, portMAX_DELAY);
 
   bool encontrado = false;
   bool ativo = false;
   String nome = "";
 
-  // Busca o cartão no arquivo JSON se a memória estiver disponível
-  if (fsPtr) {
+  // Mede apenas a busca: travessia do índice em RAM (ou, no fallback raro, a
+  // leitura da flash). A espera pelas travas e o log/histórico ficam de fora.
+  uint32_t inicioBuscaUs = micros();
+
+  // Busca no índice em RAM (sem tocar na flash). Se o índice não pôde ser
+  // montado, cai no caminho antigo lendo o arquivo.
+  if (cartoesRamValido) {
+    encontrado = consultarCartaoRam(uidFormatado, &ativo, &nome);
+  } else if (fsPtr) {
     JsonDocument doc;
     carregarJsonDoArquivo(ARQ_CARTOES, doc);
     JsonArray arr = doc.as<JsonArray>();
@@ -680,31 +1082,47 @@ void processarLeituraNfc(String uidFormatado) {
     }
   }
 
+  xSemaphoreTake(travaUltimo, portMAX_DELAY);
   ultimoCadastrado = encontrado;
   ultimoNomeLido = nome;
+  xSemaphoreGive(travaUltimo);
+
+  // Com o cache ativo fica em 0-1 ms mesmo com a base inteira de alunos.
+  uint32_t durValidacaoMs = (micros() - inicioBuscaUs) / 1000;
+  nfcUltimaDuracaoMs = durValidacaoMs;
 
   uint8_t res = (!encontrado) ? 1 : (ativo ? 0 : 2); // 0=Liberado, 1=Nao cadastrado, 2=Bloqueado
 
-  Serial.println("\n====================================");
-  Serial.printf("Cartao Detectado: %s\n", uidFormatado.c_str());
-  if (encontrado) Serial.printf("Titular: %s\n", nome.c_str());
-
-  if (res == 0) {
-    logSerial("ACESSO LIBERADO: " + nome + " [" + uidFormatado + "]", "ok");
-    acionarLedFeedback(0, 255, 0, 1800); // LED Verde vibrante
-    acionarSaidaFechadura();
-  } else if (res == 2) {
-    logSerial("ACESSO NEGADO (Bloqueado): " + nome + " [" + uidFormatado + "]", "err");
-    acionarLedFeedback(255, 0, 0, 1800); // LED Vermelho
-  } else {
-    logSerial("ACESSO NEGADO (Nao Cadastrado): [" + uidFormatado + "]", "wa");
-    acionarLedFeedback(255, 0, 0, 1800); // LED Vermelho
-  }
-  Serial.println("====================================");
-
+  // Só o histórico precisa da trava de dados; libera antes de montar Strings.
   registrarAcessoNoHistorico(uidFormatado, nome, res);
 
   xSemaphoreGive(travaDados);
+
+  String tempoValidacao = " | validacao " + String(durValidacaoMs) + " ms";
+  String msgLog;
+  const char* nivelLog = "wa";
+  if (res == 0) {
+    msgLog = "ACESSO LIBERADO: " + nome + " [" + uidFormatado + "]" + tempoValidacao;
+    nivelLog = "ok";
+    acionarLedFeedback(0, 255, 0, 1800); // LED Verde vibrante
+    acionarSaidaFechadura();
+  } else if (res == 2) {
+    msgLog = "ACESSO NEGADO (Bloqueado): " + nome + " [" + uidFormatado + "]" + tempoValidacao;
+    nivelLog = "err";
+    acionarLedFeedback(255, 0, 0, 1800); // LED Vermelho
+  } else {
+    msgLog = "ACESSO NEGADO (Nao Cadastrado): [" + uidFormatado + "]" + tempoValidacao;
+    acionarLedFeedback(255, 0, 0, 1800); // LED Vermelho
+  }
+
+  // Log fora da trava de dados: não acopla a ordem travaDados -> travaLog
+  // (evita inversão futura) e encurta o tempo com o mutex ocupado.
+  Serial.println("\n====================================");
+  Serial.printf("Cartao Detectado: %s\n", uidFormatado.c_str());
+  if (encontrado) Serial.printf("Titular: %s\n", nome.c_str());
+  Serial.println("====================================");
+
+  logSerial(msgLog, nivelLog);
 
   uint32_t durMs = (micros() - inicioUs) / 1000;
   if (durMs > diagNfcMaxMs) diagNfcMaxMs = durMs;
@@ -713,7 +1131,73 @@ void processarLeituraNfc(String uidFormatado) {
   }
 }
 
-// Tarefa dedicada do Core 0 (FreeRTOS)
+// Publica o resultado do diagnóstico para o Core 1 (que apenas lê, sob trava).
+void publicarResultadoNfc(const String& texto, uint32_t pedidoConcluido) {
+  if (travaResultadoNfc) xSemaphoreTake(travaResultadoNfc, portMAX_DELAY);
+  resultadoPedidoNfc = texto;
+  if (travaResultadoNfc) xSemaphoreGive(travaResultadoNfc);
+  pedidoNfcAtendido = pedidoConcluido;
+  // Só limpa o pedido se nenhum outro chegou enquanto este era atendido.
+  if (pedidoNfcSeq == pedidoConcluido) pedidoNfcPendente = NFC_SEM_PEDIDO;
+}
+
+// Executa o pedido de diagnóstico no Core 0, que é o único dono do I2C.
+// Pode levar ~1 s (varredura); nunca roda no Core 1 junto com a leitura.
+void atenderPedidoNfc() {
+  uint32_t pedido = pedidoNfcSeq;
+  if (pedidoNfcSeq == pedido) pedidoNfcPendente = NFC_SEM_PEDIDO;
+
+  if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
+
+  String resposta;
+  bool ok = false;
+  uint32_t v = nfc.getFirmwareVersion();
+  if (v) {
+    resposta = "PN532 Ativo! Firmware " + String((v >> 16) & 0xFF) + "." + String((v >> 8) & 0xFF);
+    ok = true;
+  } else {
+    // Varredura I2C com timeout curto para não segurar o Core 1 nem o barramento.
+    String achados = "";
+    Wire.setTimeOut(10);
+    for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+      Wire.beginTransmission(addr);
+      if (Wire.endTransmission() == 0) {
+        if (achados.length()) achados += ", ";
+        achados += "0x" + String(addr, HEX);
+      }
+      if ((addr & 0x0F) == 0) vTaskDelay(1); // devolve CPU durante a varredura
+    }
+    Wire.setTimeOut(50);
+
+    resposta = "FALHA: PN532 nao respondeu no I2C (Pinos 8 e 9).";
+    if (achados.length() == 0) {
+      resposta += " Varredura: NENHUM dispositivo no barramento. Verifique 1) chave 1=ON e 2=OFF no modulo; 2) fios SDA->GPIO8, SCL->GPIO9 (nao invertidos); 3) alimentacao VCC/GND (use 3V3).";
+    } else if (achados.startsWith("0x24")) {
+      // O módulo responde no barramento: pode ser falha momentânea do I2C.
+      for (uint8_t tentativas = 0; tentativas < 3 && !ok; tentativas++) {
+        vTaskDelay(pdMS_TO_TICKS(150));
+        if (iniciarPN532(false)) {
+          uint32_t v2 = nfc.getFirmwareVersion();
+          resposta = "PN532 recuperado! Firmware " + String((v2 >> 16) & 0xFF) + "." + String((v2 >> 8) & 0xFF) + " (detectado em 0x24, havia falha momentanea no I2C)";
+          ok = true;
+          nfcOk = true;
+          falhasHeartbeatNfc = 0;
+        }
+      }
+      if (!ok) {
+        resposta += " Varredura: dispositivo em 0x24 (o modulo responde!) mas sem versao de firmware. Confira as chaves de novo: 1=ON e 2=OFF (modo I2C, nao HSU).";
+      }
+    } else {
+      resposta += " Varredura: dispositivo estranho em " + achados + " (esperado 0x24).";
+    }
+  }
+
+  if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
+
+  publicarResultadoNfc(resposta, pedido);
+  logSerial(resposta, ok ? "ok" : "err");
+}
+
 // =====================================================================
 // Driver Nativo UART para Sensor Biométrico Óptico AS608 / FPM10A / DY50
 // (Sem dependência de bibliotecas externas — protocolo Synochip padrão)
@@ -847,7 +1331,6 @@ int bioBuscarDigital(uint16_t* idEncontrado, uint16_t* score) {
 
 void processarLeituraBiometria(uint16_t bioId) {
   uint32_t inicioUs = micros();
-  xSemaphoreTake(travaDados, portMAX_DELAY);
 
   String uidVirtual = gerarUidVirtualBio(bioId);
   String uidResolvido = uidVirtual;
@@ -855,7 +1338,20 @@ void processarLeituraBiometria(uint16_t bioId) {
   bool ativo = false;
   String nome = "";
 
-  if (fsPtr) {
+  uint32_t inicioBuscaUs = micros();
+
+  xSemaphoreTake(travaDados, portMAX_DELAY);
+  if (cartoesRamValido && cartoesRam) {
+    for (uint16_t i = 0; i < cartoesRamTotal; i++) {
+      if (cartoesRam[i].bio_id == bioId || strcasecmp(cartoesRam[i].uid, uidVirtual.c_str()) == 0) {
+        encontrado = true;
+        ativo = cartoesRam[i].ativo;
+        nome = cartoesRam[i].nome;
+        if (cartoesRam[i].uid[0] != '\0') uidResolvido = cartoesRam[i].uid;
+        break;
+      }
+    }
+  } else if (fsPtr) {
     JsonDocument doc;
     carregarJsonDoArquivo(ARQ_CARTOES, doc);
     JsonArray arr = doc.as<JsonArray>();
@@ -873,6 +1369,15 @@ void processarLeituraBiometria(uint16_t bioId) {
     }
   }
 
+  uint32_t durValidacaoMs = (micros() - inicioBuscaUs) / 1000;
+  nfcUltimaDuracaoMs = durValidacaoMs;
+
+  uint8_t res = (!encontrado) ? 1 : (ativo ? 0 : 2);
+
+  registrarAcessoNoHistorico(uidResolvido, nome, res);
+  xSemaphoreGive(travaDados);
+
+  xSemaphoreTake(travaUltimo, portMAX_DELAY);
   ultimoUidLido = uidResolvido;
   ultimoMetodoLido = "biometria";
   ultimoBioIdLido = bioId;
@@ -880,29 +1385,32 @@ void processarLeituraBiometria(uint16_t bioId) {
   ultimoSeq++;
   ultimoCadastrado = encontrado;
   ultimoNomeLido = nome;
+  xSemaphoreGive(travaUltimo);
 
-  uint8_t res = (!encontrado) ? 1 : (ativo ? 0 : 2);
+  String tempoValidacao = " | validacao " + String(durValidacaoMs) + " ms";
+  String msgLog;
+  const char* nivelLog = "wa";
 
   Serial.println("\n====================================");
   Serial.printf("Biometria Detectada: Posicao #%u (%s)\n", bioId, uidResolvido.c_str());
   if (encontrado) Serial.printf("Titular: %s\n", nome.c_str());
 
   if (res == 0) {
-    logSerial("BIOMETRIA LIBERADA: " + nome + " [#" + String(bioId) + " / " + uidResolvido + "]", "ok");
+    msgLog = "BIOMETRIA LIBERADA: " + nome + " [#" + String(bioId) + " / " + uidResolvido + "]" + tempoValidacao;
+    nivelLog = "ok";
     acionarLedFeedback(0, 255, 0, 1800);
     acionarSaidaFechadura();
   } else if (res == 2) {
-    logSerial("BIOMETRIA NEGADA (Bloqueado): " + nome + " [#" + String(bioId) + "]", "err");
+    msgLog = "BIOMETRIA NEGADA (Bloqueado): " + nome + " [#" + String(bioId) + "]" + tempoValidacao;
+    nivelLog = "err";
     acionarLedFeedback(255, 0, 0, 1800);
   } else {
-    logSerial("BIOMETRIA NAO VINCULADA: [#" + String(bioId) + " / " + uidResolvido + "]", "wa");
+    msgLog = "BIOMETRIA NAO VINCULADA: [#" + String(bioId) + " / " + uidResolvido + "]" + tempoValidacao;
     acionarLedFeedback(255, 0, 0, 1800);
   }
   Serial.println("====================================");
 
-  registrarAcessoNoHistorico(uidResolvido, nome, res);
-
-  xSemaphoreGive(travaDados);
+  logSerial(msgLog, nivelLog);
 
   uint32_t durMs = (micros() - inicioUs) / 1000;
   if (durMs > diagNfcMaxMs) diagNfcMaxMs = durMs;
@@ -991,51 +1499,116 @@ void processarCicloBiometria(uint32_t& ultimoVistoBioMs) {
   }
 }
 
+// Tarefa dedicada do Core 0 (FreeRTOS)
 void tarefaNFC(void* parametro) {
   Serial.println("[Core 0] Tarefa do Leitor NFC em execucao.");
   uint8_t uidBuffer[10];
   uint8_t uidLength = 0;
   uint32_t ultimoHeartbeatNfc = 0;
+  uint32_t ultimaLeituraOk = millis();
+  nfcUltimaLeituraMs = millis();
+  uint32_t ultimoWatchdogNfc = 0;
   uint32_t ultimoVistoBioMs = 0;
 
   for (;;) {
-    // 1. Se o módulo estiver desconectado, tenta reconectar periodicamente
+    // 0a. Reinício do leitor pedido pelo Core 1 (console/página, sem reboot).
+    if (pedidoReinicioNfc) {
+      pedidoReinicioNfc = false;
+      bool ok = reiniciarLeitorCompleto(true);
+      nfcOk = ok;
+      if (ok) {
+        falhasHeartbeatNfc = 0;
+      }
+      continue;
+    }
+
+    // 0b. Pedidos de diagnóstico vindos do Core 1 (ping/varredura I2C)
+    if (pedidoNfcPendente != NFC_SEM_PEDIDO) {
+      atenderPedidoNfc();
+      continue;
+    }
+
+    // 1. Se o módulo estiver desconectado, tenta reconectar periodicamente.
+    // A recuperação do barramento + reset do módulo rodam sob a trava para não
+    // colidir com uma gravação na flash (que suspende os dois núcleos).
     if (!nfcOk && !bioOk) {
       vTaskDelay(pdMS_TO_TICKS(1500));
-      nfcOk = iniciarPN532(false);
-      if (!bioOk) bioOk = iniciarBiometria(false);
-      if (nfcOk) {
-        Serial.println("\n[HARDWARE] Leitor NFC PN532 reconectado com sucesso!");
+      bool reconectou = reiniciarLeitorCompleto(true);
+      if (reconectou) {
+        nfcOk = true;
+        nfcReconexoes++;
+        falhasHeartbeatNfc = 0;
+        Serial.println("\n[HARDWARE] Leitor NFC PN532 reconectado (versao + SAM conferidos).");
+      }
+      if (!bioOk) {
+        bioOk = iniciarBiometria(false);
       }
       continue;
     }
 
     uint32_t agora = millis();
 
-    // 2. Teste Ativo de Presença do Módulo (Heartbeat I2C a cada 2.5s)
-    // Se o jumper SDA ou SCL for puxado, detecta a desconexão imediatamente
-    if (nfcOk && agora - ultimoHeartbeatNfc >= 2500) {
+    // 2. Heartbeat I2C a cada 5 s, com histerese: uma falha isolada não derruba
+    // o leitor (antes o LED laranja piscava por qualquer ruído no barramento).
+    // Também não sonda logo após uma leitura bem-sucedida: ela já provou que vive.
+    if (nfcOk && agora - ultimoHeartbeatNfc >= 5000 && agora - ultimaLeituraOk > 3000) {
       ultimoHeartbeatNfc = agora;
+      if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
       uint32_t versao = nfc.getFirmwareVersion();
+      if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
       if (!versao) {
-        nfcOk = false;
-        Serial.println("\n[ALERTA HARDWARE] Modulo PN532 parou de responder! Verifique os fios SDA (GPIO 8) e SCL (GPIO 9).");
-        continue;
+        if (++falhasHeartbeatNfc >= 3) {
+          nfcOk = false;
+          falhasHeartbeatNfc = 0;
+          Serial.println("\n[ALERTA HARDWARE] Modulo PN532 parou de responder! Verifique SDA (GPIO 8), SCL (GPIO 9) e a solda do RST no GPIO 5.");
+          continue;
+        }
+      } else {
+        falhasHeartbeatNfc = 0;
+        uint32_t pilha = uxTaskGetStackHighWaterMark(NULL);
+        if (diagNfcStackMin == 0 || pilha < diagNfcStackMin) diagNfcStackMin = pilha;
       }
-      uint32_t pilha = uxTaskGetStackHighWaterMark(NULL);
-      if (diagNfcStackMin == 0 || pilha < diagNfcStackMin) diagNfcStackMin = pilha;
     }
 
-    // 3. Leitura passiva com timeout curto (50ms)
-    bool detectado = nfcOk ? nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uidBuffer, &uidLength, 50) : false;
+    // 2b. Watchdog de leitura: muito tempo sem nenhum cartão pode ser corredor
+    // vazio, mas também pode ser o estado "zumbi" (responde à versão e não lê).
+    // O reinício completo é barato (só I2C) e devolve o leitor sozinho; fica
+    // limitado a uma tentativa a cada 10 min.
+    if (nfcOk && agora - nfcUltimaLeituraMs > NFC_WATCHDOG_OCIOSO_MS &&
+        agora - ultimoWatchdogNfc > NFC_WATCHDOG_INTERVALO_MS) {
+      ultimoWatchdogNfc = agora;
+      bool recuperou = reiniciarLeitorCompleto(true);
+      if (!recuperou) {
+        nfcOk = false;
+        falhasHeartbeatNfc = 0;
+        Serial.println("[ALERTA] Watchdog nao conseguiu recuperar o PN532; LED laranja.");
+      }
+      continue;
+    }
+
+    // 3. Leitura passiva com timeout curto (50ms), sem gravação de flash em voo.
+    bool detectado = false;
+    if (nfcOk) {
+      if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
+      detectado = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uidBuffer, &uidLength, 50);
+      if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
+    }
 
     if (detectado && uidLength > 0 && uidLength <= 10) {
-      ultimoHeartbeatNfc = millis(); // Se leu cartão, o hardware está 100% responsivo
+      ultimaLeituraOk = millis();
+      nfcUltimaLeituraMs = ultimaLeituraOk;
+      ultimoHeartbeatNfc = ultimaLeituraOk; // Se leu cartão, o hardware está 100% responsivo
+      falhasHeartbeatNfc = 0;
       String uidStr = uidBytesParaTexto(uidBuffer, uidLength);
       agora = millis();
 
       // Evita disparar repetidas vezes enquanto o cartão continua encostado
-      if (uidStr.equalsIgnoreCase(ultimoUidLido) && (agora - ultimoVistoMs < 2000)) {
+      String uidAnterior;
+      xSemaphoreTake(travaUltimo, portMAX_DELAY);
+      uidAnterior = ultimoUidLido;
+      xSemaphoreGive(travaUltimo);
+
+      if (uidStr.equalsIgnoreCase(uidAnterior) && (agora - ultimoVistoMs < 2000)) {
         ultimoVistoMs = agora;
       } else {
         ultimoVistoMs = agora;
@@ -1126,6 +1699,7 @@ void rotaAdicionarCartao() {
   novo["ativo"] = ativo;
 
   salvarJsonNoArquivo(ARQ_CARTOES, doc);
+  indiceDoDocumento(doc); // mantém a validação em RAM sincronizada com a flash
   xSemaphoreGive(travaDados);
 
   Serial.printf("[WEB] Cartao cadastrado: %s (%s)\n", uid.c_str(), nome.c_str());
@@ -1189,6 +1763,7 @@ void rotaAtualizarCartao() {
   }
 
   salvarJsonNoArquivo(ARQ_CARTOES, doc);
+  indiceDoDocumento(doc); // mantém a validação em RAM sincronizada com a flash
   xSemaphoreGive(travaDados);
 
   responderJson(200, "{\"ok\":true}");
@@ -1221,6 +1796,7 @@ void rotaExcluirCartao() {
 
   arr.remove(indexRemover);
   salvarJsonNoArquivo(ARQ_CARTOES, doc);
+  indiceDoDocumento(doc); // mantém a validação em RAM sincronizada com a flash
   xSemaphoreGive(travaDados);
 
   Serial.printf("[WEB] Cartao removido: %s\n", uid.c_str());
@@ -1249,6 +1825,7 @@ void rotaRestaurarBackup() {
 
   xSemaphoreTake(travaDados, portMAX_DELAY);
   salvarJsonNoArquivo(ARQ_CARTOES, doc);
+  indiceDoDocumento(doc); // mantém a validação em RAM sincronizada com a flash
   xSemaphoreGive(travaDados);
 
   responderJson(200, "{\"ok\":true}");
@@ -1303,11 +1880,12 @@ void rotaSincronizarAluno() {
     JsonObject novo = arr.add<JsonObject>();
     novo["uid"] = uid;
     novo["nome"] = nome.isEmpty() ? "Aluno" : nome;
-    if (server.hasArg("plain")) { JsonDocument b; if (deserializeJson(b, server.arg("plain")) == DeserializationError::Ok && (b["bio_id"] | 0) > 0) novo["bio_id"] = (uint16_t)(b["bio_id"] | 0); }
     novo["ativo"] = ativo;
+    if (server.hasArg("plain")) { JsonDocument b; if (deserializeJson(b, server.arg("plain")) == DeserializationError::Ok && (b["bio_id"] | 0) > 0) novo["bio_id"] = (uint16_t)(b["bio_id"] | 0); }
   }
 
   salvarJsonNoArquivo(ARQ_CARTOES, doc);
+  indiceDoDocumento(doc); // mantém a validação em RAM sincronizada com a flash
   xSemaphoreGive(travaDados);
 
   String logMsg = "[SYNC] Aluno " + (nome.isEmpty() ? uid : nome) + " atualizado para " + (ativo ? "LIBERADO" : "BLOQUEADO");
@@ -1330,6 +1908,7 @@ void rotaSincronizarTodosAlunos() {
 
   xSemaphoreTake(travaDados, portMAX_DELAY);
   salvarJsonNoArquivo(ARQ_CARTOES, doc);
+  indiceDoDocumento(doc); // mantém a validação em RAM sincronizada com a flash
   xSemaphoreGive(travaDados);
 
   int total = doc.as<JsonArray>().size();
@@ -1368,6 +1947,7 @@ void rotaRemoverAlunoSincronizado() {
   if (idx >= 0) {
     arr.remove(idx);
     salvarJsonNoArquivo(ARQ_CARTOES, doc);
+    indiceDoDocumento(doc);
   }
   xSemaphoreGive(travaDados);
 
@@ -1376,18 +1956,34 @@ void rotaRemoverAlunoSincronizado() {
 }
 
 void rotaUltimoCartao() {
-  // Rota de leitura pública para totens e portaria web na rede local
+  // Rota de leitura pública para totens e portaria web na rede local.
+  // Copia o estado sob trava antes de serializar: as Strings são escritas no Core 0.
+  String uid, nome, metodo;
+  bool cadastrado = false;
+  uint32_t seq = 0, lidoMs = 0;
+  uint16_t bioId = 0;
+
+  xSemaphoreTake(travaUltimo, portMAX_DELAY);
+  uid = ultimoUidLido;
+  nome = ultimoNomeLido;
+  cadastrado = ultimoCadastrado;
+  metodo = ultimoMetodoLido;
+  bioId = ultimoBioIdLido;
+  seq = ultimoSeq;
+  lidoMs = ultimoLidoMs;
+  xSemaphoreGive(travaUltimo);
+
   JsonDocument doc;
   doc["nfc_ok"] = nfcOk;
   doc["bio_ok"] = bioOk;
-  doc["metodo"] = ultimoMetodoLido;
-  if (ultimoBioIdLido > 0) doc["bio_id"] = ultimoBioIdLido;
-  doc["seq"] = ultimoSeq;
-  if (ultimoSeq > 0) {
-    doc["uid"] = ultimoUidLido;
-    doc["nome"] = ultimoNomeLido;
-    doc["cadastrado"] = ultimoCadastrado;
-    doc["ha"] = (millis() - ultimoLidoMs) / 1000;
+  doc["seq"] = seq;
+  if (seq > 0) {
+    doc["uid"] = uid;
+    doc["nome"] = nome;
+    doc["cadastrado"] = cadastrado;
+    doc["metodo"] = metodo;
+    if (bioId > 0) doc["bio_id"] = bioId;
+    doc["ha"] = (millis() - lidoMs) / 1000;
   }
   String s;
   serializeJson(doc, s);
@@ -1398,16 +1994,34 @@ void rotaObterLog() {
   if (!autenticarRequisicao()) return;
   if (!fsPtr) return responderJson(200, "[]");
 
-  xSemaphoreTake(travaDados, portMAX_DELAY);
+  // Serve do cache em RAM: nenhuma leitura de flash por poll do painel/página.
   JsonDocument doc;
-  carregarJsonDoArquivo(ARQ_HISTORICO, doc);
-  xSemaphoreGive(travaDados);
-
   uint32_t agora = millis();
-  JsonArray arr = doc.as<JsonArray>();
-  for (JsonObject item : arr) {
-    uint32_t tempo = item["tempo"].as<uint32_t>();
-    item["ha"] = (agora >= tempo) ? (agora - tempo) / 1000 : 0;
+
+  if (historicoRam) {
+    xSemaphoreTake(travaDados, portMAX_DELAY);
+    JsonArray arr = doc.to<JsonArray>();
+    for (uint16_t i = 0; i < historicoRamTotal; i++) {
+      JsonObject item = arr.add<JsonObject>();
+      item["uid"] = historicoRam[i].uid;
+      item["nome"] = historicoRam[i].nome;
+      item["res"] = historicoRam[i].res;
+      item["dh"] = historicoRam[i].dh;
+      item["tempo"] = historicoRam[i].tempo;
+      item["ha"] = (agora >= historicoRam[i].tempo) ? (agora - historicoRam[i].tempo) / 1000 : 0;
+    }
+    xSemaphoreGive(travaDados);
+  } else {
+    // Sem RAM (alocação falhou): mantém o comportamento antigo lendo a flash.
+    xSemaphoreTake(travaDados, portMAX_DELAY);
+    carregarJsonDoArquivo(ARQ_HISTORICO, doc);
+    xSemaphoreGive(travaDados);
+
+    JsonArray arr = doc.as<JsonArray>();
+    for (JsonObject item : arr) {
+      uint32_t tempo = item["tempo"].as<uint32_t>();
+      item["ha"] = (agora >= tempo) ? (agora - tempo) / 1000 : 0;
+    }
   }
 
   String s;
@@ -1420,9 +2034,12 @@ void rotaLimparLog() {
   if (!fsPtr) return responderJson(200, "{\"ok\":true}");
 
   xSemaphoreTake(travaDados, portMAX_DELAY);
+  if (historicoRam) historicoRamTotal = 0;
+  historicoSeqGerado++;
   JsonDocument doc;
   doc.to<JsonArray>();
-  salvarJsonNoArquivo(ARQ_HISTORICO, doc);
+  bool gravou = salvarJsonNoArquivo(ARQ_HISTORICO, doc);
+  historicoSujo = !gravou;
   xSemaphoreGive(travaDados);
   responderJson(200, "{\"ok\":true}");
 }
@@ -1456,6 +2073,17 @@ void rotaStatusSistema() {
   doc["loop_max_ms"] = diagLoopMaxMs;
   doc["http_max_ms"] = diagHttpMaxMs;
   doc["nfc_max_ms"] = diagNfcMaxMs;
+  doc["nfc_ultimo_ms"] = nfcUltimaDuracaoMs;
+  doc["nfc_sam_ok"] = nfcSamOk;
+  doc["nfc_reinicios"] = nfcReinicios;
+  doc["nfc_reconexoes"] = nfcReconexoes;
+  doc["nfc_ultima_leitura_s"] = nfcUltimaLeituraMs ? (millis() - nfcUltimaLeituraMs) / 1000 : 0;
+  doc["nfc_ultimo_reinicio_s"] = nfcUltimoReinicioMs ? (millis() - nfcUltimoReinicioMs) / 1000 : 0;
+  doc["cartoes_ram"] = cartoesRamTotal;
+  doc["historico_ram"] = historicoRamTotal;
+  doc["historico_pendente"] = historicoSujo;
+  doc["ram_cache_bytes"] = (uint32_t)(cartoesRamCapacidade * sizeof(CartaoRam) +
+                                      (historicoRam ? MAX_HISTORICO_LOG * sizeof(HistoricoRam) : 0));
   doc["fs_max_ms"] = diagFsMaxMs;
   doc["engasgos"] = diagEngasgos;
   doc["uptime"] = millis() / 1000;
@@ -1471,9 +2099,9 @@ void rotaDiagnostico() {
   doc["versao"] = FW_VERSAO;
   doc["uptime_s"] = millis() / 1000;
   doc["nfc_ok"] = nfcOk;
-  doc["bio_ok"] = bioOk;
-  doc["metodo"] = ultimoMetodoLido;
-  if (ultimoBioIdLido > 0) doc["bio_id"] = ultimoBioIdLido;
+  doc["nfc_sam_ok"] = nfcSamOk;
+  doc["nfc_reinicios"] = nfcReinicios;
+  doc["nfc_reconexoes"] = nfcReconexoes;
   doc["rssi"] = WiFi.RSSI();
   doc["heap_livre"] = ESP.getFreeHeap();
   doc["heap_min"] = ESP.getMinFreeHeap();
@@ -1744,26 +2372,73 @@ void rotaEstadoWifi() {
 void rotaScanWifi() {
   if (!autenticarWifi()) return;
 
+  // Em STA a rede já está escolhida e a troca exige "Esquecer rede" (modo AP).
+  // Varrer aqui só bloqueava o servidor por ~2,8 s sem utilidade.
+  if (!modoAP) {
+    responderJson(200, "{\"ok\":true,\"scanning\":false,\"redes\":[],\"motivo\":\"conectado\"}");
+    return;
+  }
+
   bool forcar = server.hasArg("forcar") && server.arg("forcar") != "0";
   uint32_t agora = millis();
-  bool cacheOk = scanCacheValido && !forcar && (agora - scanCacheMs) < SCAN_CACHE_MS;
 
+  // Já existe uma varredura em andamento: responde na hora e o loop coleta.
+  if (wifiScanEmAndamento) {
+    if (agora - wifiScanInicioMs > 20000) { // trava de segurança do rádio
+      wifiScanEmAndamento = false;
+      WiFi.scanDelete();
+    } else {
+      responderJson(200, "{\"ok\":true,\"scanning\":true,\"redes\":[]}");
+      return;
+    }
+  }
+
+  bool cacheOk = scanCacheValido && !forcar && (agora - scanCacheMs) < SCAN_CACHE_MS;
   if (!cacheOk) {
-    int16_t total = WiFi.scanNetworks(false, true, false, 120);
-    if (total < 0) {
+    int16_t inicio = WiFi.scanNetworks(true, true, false, 120); // true = assíncrono
+    if (inicio == WIFI_SCAN_RUNNING) {
+      wifiScanEmAndamento = true;
+      wifiScanInicioMs = agora;
+      responderJson(200, "{\"ok\":true,\"scanning\":true,\"redes\":[]}");
+      return;
+    }
+    if (inicio < 0) {
       scanCacheValido = false;
       logSerial("[WIFI] Varredura de redes falhou.", "err");
       return responderErro(502, "Nao foi possivel escanear as redes agora. Tente novamente.");
     }
-    scanCacheJson = montarRedesJson(total);
+    // Terminou de imediato (raro): monta o cache direto.
+    scanCacheJson = montarRedesJson(inicio);
     scanCacheMs = millis();
     scanCacheValido = true;
     WiFi.scanDelete();
-    Serial.printf("[WEB] Varredura Wi-Fi: %d rede(s) encontrada(s).\n", total);
+    logSerial("[WEB] Varredura Wi-Fi: " + String(inicio) + " rede(s) encontrada(s).", "info");
   }
 
   String s = "{\"ok\":true,\"scanning\":false,\"ts\":" + String(scanCacheMs) + ",\"redes\":" + scanCacheJson + "}";
   responderJson(200, s);
+}
+
+// Chamado no loop (Core 1): coleta a varredura assíncrona quando o rádio termina.
+void processarScanWifi() {
+  if (!wifiScanEmAndamento) return;
+
+  int16_t total = WiFi.scanComplete();
+  if (total == WIFI_SCAN_RUNNING) return;
+
+  wifiScanEmAndamento = false;
+  if (total < 0) {
+    scanCacheValido = false;
+    WiFi.scanDelete();
+    logSerial("[WIFI] Varredura de redes falhou.", "err");
+    return;
+  }
+
+  scanCacheJson = montarRedesJson(total);
+  scanCacheMs = millis();
+  scanCacheValido = true;
+  WiFi.scanDelete();
+  logSerial("[WEB] Varredura Wi-Fi: " + String(total) + " rede(s) encontrada(s).", "info");
 }
 
 void finalizarTentativaWifi(wl_status_t situacao) {
@@ -1860,6 +2535,7 @@ void processarTentativaWifi() {
   if (wifiReiniciarEm && millis() >= wifiReiniciarEm) {
     wifiReiniciarEm = 0;
     Serial.println("[SISTEMA] Reiniciando para aplicar a configuracao de Wi-Fi...");
+    gravarHistoricoAgora();
     delay(150);
     ESP.restart();
   }
@@ -1927,6 +2603,9 @@ void rotaObterLogsConsole() {
 
   JsonArray arr = doc["logs"].to<JsonArray>();
 
+  // O Core 0 escreve no buffer de logs; sem a trava o Core 1 pode copiar
+  // Strings no meio de uma escrita e devolver texto corrompido (ou cair).
+  if (travaLog) xSemaphoreTake(travaLog, portMAX_DELAY);
   for (int i = 0; i < logTotal; i++) {
     int idx = (logIndexInicio + i) % MAX_LOG_CONSOLE;
     if (bufferLogs[idx].id > desde) {
@@ -1937,6 +2616,7 @@ void rotaObterLogsConsole() {
       item["tipo"] = bufferLogs[idx].tipo;
     }
   }
+  if (travaLog) xSemaphoreGive(travaLog);
 
   String s;
   serializeJson(doc, s);
@@ -1952,14 +2632,22 @@ void rotaComandoConsole() {
   String resposta = "";
 
   if (cmd == "ping_nfc") {
-    uint32_t v = nfc.getFirmwareVersion();
-    if (v) {
-      resposta = "PN532 Ativo! Firmware " + String((v >> 16) & 0xFF) + "." + String((v >> 8) & 0xFF);
-      logSerial(resposta, "ok");
-    } else {
-      resposta = "FALHA: PN532 nao respondeu no I2C (Pinos 8 e 9)";
-      logSerial(resposta, "err");
+    // O I2C pertence à tarefa NFC (Core 0). Aqui apenas enfileiramos o pedido e
+    // aguardamos o resultado publicado — nenhum acesso ao PN532 a partir do Core 1.
+    pedidoNfcSeq++;
+    uint32_t alvo = pedidoNfcSeq;
+    pedidoNfcPendente = NFC_PEDIR_PING;
+
+    uint32_t esperaInicio = millis();
+    while (pedidoNfcAtendido != alvo && (millis() - esperaInicio) < 3000) {
+      delay(20); // cede o Core 1 enquanto o Core 0 executa o diagnóstico
     }
+
+    if (travaResultadoNfc) xSemaphoreTake(travaResultadoNfc, portMAX_DELAY);
+    bool concluido = (pedidoNfcAtendido == alvo) && !resultadoPedidoNfc.isEmpty();
+    resposta = concluido ? resultadoPedidoNfc
+                         : "Sem resposta: a tarefa NFC nao concluiu o diagnostico em 3 s. Tente novamente.";
+    if (travaResultadoNfc) xSemaphoreGive(travaResultadoNfc);
   } else if (cmd == "status") {
     resposta = "IP: " + (modoAP ? WiFi.softAPIP() : WiFi.localIP()).toString() +
                " | RSSI: " + String(WiFi.RSSI()) + " dBm" +
@@ -1988,9 +2676,21 @@ void rotaComandoConsole() {
     logIndexInicio = 0;
     resposta = "Logs de memoria limpos.";
     logSerial(resposta, "wa");
+  } else if (cmd == "reset_nfc") {
+    // A tarefa NFC (Core 0) é a dona do I2C; aqui só levantamos a bandeira.
+    pedidoReinicioNfc = true;
+    resposta = "Reinicio do leitor NFC solicitado (atende em ate 1 s).";
+    logSerial("[NFC] " + resposta, "wa");
+  } else if (cmd == "nfc_status") {
+    resposta = String("NFC: ") + (nfcOk ? "ok" : "off") +
+               " | SAM: " + (nfcSamOk ? "ok" : "falhou") +
+               " | reinicios: " + String(nfcReinicios) +
+               " | reconexoes: " + String(nfcReconexoes);
+    logSerial(resposta, nfcOk ? "info" : "wa");
   } else if (cmd == "reboot") {
     logSerial("[SISTEMA] Reiniciando ESP32 por comando remoto...", "err");
     responderJson(200, "{\"ok\":true, \"msg\":\"Reiniciando placa em 1 segundo...\"}");
+    gravarHistoricoAgora();
     delay(1000);
     ESP.restart();
     return;
@@ -2015,6 +2715,7 @@ void rotaOtaFinalizar() {
   if (!autenticarRequisicao()) return;
   server.sendHeader("Connection", "close");
   server.send(200, "text/plain", (Update.hasError()) ? "FALHA" : "OK");
+  gravarHistoricoAgora();
   delay(1000);
   ESP.restart();
 }
@@ -2033,6 +2734,10 @@ void rotaOtaUpload() {
       Update.printError(Serial);
       logSerial("[OTA] Erro no Update.write", "err");
     }
+    // Cede a CPU a cada 32 blocos: a gravação de firmware inteira sem pausa pode
+    // estourar o task watchdog (TG1WDT_SYS_RST) em rede lenta.
+    static uint32_t blocosOta = 0;
+    if ((++blocosOta & 0x1F) == 0) delay(1);
   } else if (upload.status == UPLOAD_FILE_END) {
     if (Update.end(true)) {
       logSerial("[OTA] Gravacao concluida com sucesso! " + String(upload.totalSize) + " bytes.", "ok");
@@ -2485,6 +3190,9 @@ void setup() {
   aplicarCorLed(0, 30, 60);
 
   travaDados = xSemaphoreCreateMutex();
+  travaUltimo = xSemaphoreCreateMutex();
+  travaResultadoNfc = xSemaphoreCreateMutex();
+  travaNfcFlash = xSemaphoreCreateMutex();
 
 #if PINO_SAIDA >= 0
   pinMode(PINO_SAIDA, OUTPUT);
@@ -2500,10 +3208,26 @@ void setup() {
   Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setTimeOut(50); // Timeout para evitar travamento se os fios do leitor soltarem
   uint32_t marcaNfc = millis();
+  if (travaNfcFlash) xSemaphoreTake(travaNfcFlash, portMAX_DELAY);
   nfcOk = iniciarPN532(true);
+  if (travaNfcFlash) xSemaphoreGive(travaNfcFlash);
   bioOk = iniciarBiometria(true);
   logSerial(String("[BOOT] Biometria AS608/FPM10A ") + (bioOk ? "OK" : "AUSENTE (opcional)"), bioOk ? "ok" : "info");
   logSerial(String("[BOOT] PN532 ") + (nfcOk ? "OK" : "AUSENTE") + " em " + String(millis() - marcaNfc) + " ms", nfcOk ? "ok" : "err");
+
+  // Cria a tarefa de leitura do NFC no CORE 0 ANTES do Wi-Fi: o leitor funciona
+  // mesmo que a rede demore (o boot espera até 20 s pelo roteador, e antes
+  // nenhum cartão era lido nesse intervalo). Stack maior porque a tarefa
+  // desserializa JSON ao validar o cartão.
+  xTaskCreatePinnedToCore(
+    tarefaNFC,
+    "Tarefa_NFC",
+    8192,
+    NULL,
+    1,
+    NULL,
+    0
+  );
 
   uint32_t marcaWifi = millis();
   iniciarConexaoWiFi();
@@ -2511,17 +3235,6 @@ void setup() {
   configurarRotasServidor();
   server.begin();
   logSerial(String("[BOOT] Servidor HTTP iniciado | heap ") + String(ESP.getFreeHeap()) + " | PSRAM " + String(ESP.getFreePsram()), "info");
-
-  // Cria a tarefa de leitura do NFC no CORE 0
-  xTaskCreatePinnedToCore(
-    tarefaNFC,
-    "Tarefa_NFC",
-    4096,
-    NULL,
-    1,
-    NULL,
-    0
-  );
 
   diagUltimoLoopMs = millis();
   diagUltimoHeartbeatMs = millis();
@@ -2533,7 +3246,9 @@ void loop() {
   uint32_t inicioLoopUs = micros();
   uint32_t agoraMs = millis();
 
-  // Gap entre iterações: se o Core 1 ficou bloqueado, aparece aqui.
+  // Gap entre iterações: agora mede do FIM da iteração anterior até o início
+  // desta. Antes era de início para início, então qualquer requisição HTTP
+  // lenta (ex.: /api/log lendo 39 ms de flash) era contada como "engasgo".
   if (diagUltimoLoopMs != 0) {
     uint32_t gapMs = agoraMs - diagUltimoLoopMs;
     if (gapMs >= DIAG_LIMIAR_LOOP_MS) {
@@ -2541,7 +3256,6 @@ void loop() {
       registrarEventoDiag("LOOP", gapMs, "gap entre iteracoes do loop");
     }
   }
-  diagUltimoLoopMs = agoraMs;
 
   uint32_t inicioHttpUs = micros();
   server.handleClient();
@@ -2553,8 +3267,10 @@ void loop() {
 
   dnsServer.processNextRequest(); // portal cativo (sem efeito fora do modo AP)
   processarTentativaWifi();
+  processarScanWifi();           // coleta a varredura de Wi-Fi assíncrona
   atualizarSaidaFechadura();
   atualizarLedStatus();
+  gravarHistoricoSePreciso(); // grava o histórico em lote (no máximo a cada 1,5 s)
 
   uint32_t totalMs = (micros() - inicioLoopUs) / 1000;
   if (totalMs > diagLoopMaxMs) diagLoopMaxMs = totalMs;
@@ -2575,7 +3291,12 @@ void loop() {
              (unsigned)uxTaskGetStackHighWaterMark(NULL),
              (unsigned)diagNfcStackMin);
     logSerial(String("[DIAG] ") + linha, "info");
+    // A média é do intervalo de 60 s; zerar evita erro depois de ~50 dias de
+    // uptime, quando o somatório de 32 bits estoura.
+    diagLoopSomaMs = 0;
+    diagLoopAmostras = 0;
   }
 
+  diagUltimoLoopMs = millis();
   delay(2);
 }
