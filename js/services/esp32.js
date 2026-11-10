@@ -253,12 +253,13 @@ export function iniciarMonitoramento({ onStatus, onCartao } = {}) {
       if (dados && dados.seq !== undefined && dados.seq !== seqVisto) {
         const mudou = seqVisto !== null;
         const recente = dados.ha === undefined || Number(dados.ha) <= 10;
+        const temEvento = Boolean(dados.uid || dados.bio_id || dados.biometria_desconhecida);
         seqVisto = dados.seq;
-        if ((dados.uid || dados.bio_id) && recente && (primeiraLeitura || mudou)) {
+        if (temEvento && recente && (primeiraLeitura || mudou)) {
           if (onCartao) onCartao(dados.uid, dados);
         }
         primeiraLeitura = false;
-      } else if (dados && (dados.uid || dados.bio_id) && primeiraLeitura) {
+      } else if (dados && (dados.uid || dados.bio_id || dados.biometria_desconhecida) && primeiraLeitura) {
         // Primeira leitura com o cartão/digital ainda dentro da janela de 10s.
         if (dados.ha === undefined || Number(dados.ha) <= 10) {
           if (onCartao) onCartao(dados.uid, dados);

@@ -760,35 +760,39 @@ async function processarCartao(uid, dadosLeitura = null) {
   state.processandoCartao = true;
 
   try {
+    const biometriaDesconhecida = Boolean(dadosLeitura?.biometria_desconhecida);
     const bioId = normalizarBiometriaId(dadosLeitura?.bio_id) || extrairBiometriaIdDeUid(uid);
-    const ehBiometria = Boolean(dadosLeitura?.metodo === 'BIOMETRIA' || bioId !== null);
-    const normalizado = normalizarUid(uid) || (bioId ? gerarUidVirtualBiometria(bioId) : '') || uid;
+    const metodo = String(dadosLeitura?.metodo || '').toUpperCase();
+    const ehBiometria = Boolean(biometriaDesconhecida || metodo === 'BIOMETRIA' || bioId !== null);
+    const normalizado = normalizarUid(uid) || (bioId ? gerarUidVirtualBiometria(bioId) : '') || (biometriaDesconhecida ? 'BIO:DESCONHECIDA' : '') || uid;
     const agora = Date.now();
     const ultimo = state.ultimoProcessamento.get(normalizado) || 0;
     if (agora - ultimo < 2500) return;
     state.ultimoProcessamento.set(normalizado, agora);
 
     let aluno = null;
-    try {
-      if (bioId !== null) {
-        aluno = await Supabase.buscarAlunoPorBiometria(bioId);
+    if (!biometriaDesconhecida) {
+      try {
+        if (bioId !== null) {
+          aluno = await Supabase.buscarAlunoPorBiometria(bioId);
+        }
+        if (!aluno && normalizado) {
+          aluno = await Supabase.buscarAlunoPorUid(normalizado);
+        }
+      } catch (erroConsulta) {
+        // Sem internet, usa a base já carregada/cacheada neste dispositivo.
+        const doCache = state.alunos.find((a) => (bioId !== null && Number(a.biometria_id) === bioId) || normalizarUid(a.uid_nfc) === normalizado);
+        if (!doCache) throw erroConsulta;
+        aluno = doCache;
+        toast('Nuvem indisponível. Exibindo dados da base local em cache.', 'err');
       }
-      if (!aluno && normalizado) {
-        aluno = await Supabase.buscarAlunoPorUid(normalizado);
-      }
-    } catch (erroConsulta) {
-      // Sem internet, usa a base já carregada/cacheada neste dispositivo.
-      const doCache = state.alunos.find((a) => (bioId !== null && Number(a.biometria_id) === bioId) || normalizarUid(a.uid_nfc) === normalizado);
-      if (!doCache) throw erroConsulta;
-      aluno = doCache;
-      toast('Nuvem indisponível. Exibindo dados da base local em cache.', 'err');
     }
     const momento = new Date();
     const evento = {
       id: gerarId(),
       uid_nfc: normalizado,
       aluno_id: aluno?.id || null,
-      nome_identificado: aluno?.nome_completo || 'Não cadastrado',
+      nome_identificado: aluno?.nome_completo || (biometriaDesconhecida ? 'Biometria não reconhecida' : 'Não cadastrado'),
       turma: aluno?.turma || null,
       foto_url: aluno?.foto_url || null,
       tipo_evento: 'ENTRADA',
@@ -846,15 +850,19 @@ function renderizarTotemDesconhecido(uid, ehBiometria = false, bioId = null) {
   const foto = $('totemFoto');
   if (!card || !badge || !foto) return;
   foto.src = obterAvatarPadrao('?');
-  foto.alt = 'Cartão não cadastrado';
-  $('totemNome').textContent = ehBiometria ? 'Digital Desconhecida' : 'Cartão Desconhecido';
+  foto.alt = ehBiometria ? 'Biometria não reconhecida' : 'Cartão não cadastrado';
+  $('totemNome').textContent = ehBiometria ? 'Biometria não reconhecida' : 'Cartão Desconhecido';
   $('totemMatricula').textContent = '—';
   $('totemTurma').textContent = '—';
   $('totemCurso').textContent = '—';
   $('totemResponsavel').textContent = '—';
   card.className = 'card-totem bloqueado';
   badge.className = 'tag-status-acesso status-negado';
-  badge.textContent = ehBiometria && bioId ? `NÃO CADASTRADO (DIGITAL #${bioId})` : `NÃO CADASTRADO (${uid})`;
+  if (ehBiometria) {
+    badge.textContent = bioId ? `NÃO CADASTRADO (DIGITAL #${bioId})` : 'BIOMETRIA NÃO RECONHECIDA';
+  } else {
+    badge.textContent = `NÃO CADASTRADO (${uid})`;
+  }
 }
 
 function resetarTotem() {

@@ -85,6 +85,7 @@ escola-nfc-web-offline/
 │   ├── check-syntax.mjs        # Validação estática de sintaxe de todos os arquivos JS
 │   ├── lab-setup.mjs           # Descoberta de IP de rede e configuração automática do .env
 │   ├── mock-esp.mjs            # Emulador do microcontrolador para testes sem hardware
+│   ├── network.mjs             # Regra de escolha do IP (ignora virtuais; prioriza hotspot)
 │   └── serve-local.mjs         # Servidor HTTP estático nativo para a porta 5500
 ├── supabase/                   # Configuração e migrações da pilha local Supabase
 │   ├── config.toml             # Definição de portas, limites e serviços da CLI
@@ -94,6 +95,9 @@ escola-nfc-web-offline/
 ├── lab.cmd                     # Inicializador do menu interativo no Windows
 ├── lab-menu.ps1                # TUI interativa em PowerShell com renderização direta
 ├── lab-estado.ps1              # Processo daemon para monitoramento das luzes da TUI
+├── lab-hotspot.ps1             # Cria a rede Wi-Fi NFC-Lab sem internet (192.168.137.1)
+├── lab-hotspot.cmd             # Atalho de duplo clique para ligar o hotspot
+├── lab-hotspot-desligar.cmd    # Atalho para desligar o hotspot
 ├── lab-ligar.cmd               # Script rápido de inicialização do contêiner e servidor
 ├── lab-desligar.cmd            # Script rápido para encerramento dos contêineres Docker
 ├── lab-checar.cmd              # Script rápido para verificação de conectividade

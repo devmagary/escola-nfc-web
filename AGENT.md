@@ -81,7 +81,7 @@ Para operadores e técnicos de suporte em campo:
 ```cmd
 lab.cmd
 ```
-Abre a TUI unificada de 24 linhas com monitoramento em tempo real do Docker, Banco, Painel e ESP32.
+Abre a TUI unificada de 24 linhas com monitoramento em tempo real do Docker, Banco, Painel, ESP32 e Hotspot. O item **Hotspot NFC-Lab** liga/desliga a rede sem internet e atualiza o IP no `.env.local`; o "Ligar tudo" segue o `LAB_HOTSPOT_MODO` (`auto`, `sempre` ou `nunca`).
 
 ### 3.3 Verificação de Sintaxe, Testes e Simulação
 ```bash
@@ -102,13 +102,16 @@ npm run mock:esp
 ## 4. Estrutura de Arquivos e Responsabilidades
 
 - `lab.cmd`: Ponto de entrada rápido para iniciar `lab-menu.ps1`.
-- `lab-menu.ps1`: TUI interativa em PowerShell com renderização direta no console via `[Console]::Write`.
-- `lab-estado.ps1`: Processo em segundo plano que monitora a saúde das portas e grava estado em arquivo temporário JSON.
+- `lab-menu.ps1`: TUI interativa em PowerShell com renderização direta no console via `[Console]::Write` e item de hotspot.
+- `lab-estado.ps1`: Processo em segundo plano que monitora a saúde das portas e grava estado em arquivo temporário JSON (inclui o hotspot).
+- `lab-hotspot.ps1` / `lab-hotspot.cmd`: Criam a rede Wi-Fi `NFC-Lab` sem internet via API de tethering do Windows (`192.168.137.1`).
+- `lab-hotspot-desligar.cmd`: Desliga a rede `NFC-Lab` e devolve o Wi-Fi normal.
 - `lab-ligar.cmd`: Automação em lote que inicia o Docker, Supabase e o servidor do painel.
 - `lab-desligar.cmd`: Automação em lote que encerra os contêineres do Supabase.
 - `lab-checar.cmd`: Atalho de execução para `scripts/check-lab.mjs`.
-- `lab-firewall-liberar.cmd`: Cria regras no Firewall do Windows para as portas 54321, 5500 e 54323.
-- `lab-criar-atalhos.cmd` / `lab-atalhos.ps1`: Gera atalhos `.lnk` na área de trabalho do usuário.
+- `lab-firewall-liberar.cmd`: Cria regras no Firewall do Windows para as portas 80, 54321, 5500 e 54323 só para a rede local (Wi-Fi, cabo e hotspot).
+- `lab-criar-atalhos.cmd` / `lab-atalhos.ps1`: Gera atalhos `.lnk` na área de trabalho do usuário ("Servidor NFC" e "Hotspot NFC").
+- `scripts/network.mjs`: Centraliza a escolha do IP do notebook, ignorando interfaces virtuais e priorizando o hotspot `192.168.137.1`.
 - `scripts/lab-setup.mjs`: Varre interfaces de rede físicas (excluindo adaptadores virtuais WSL/Hyper-V/Docker), atualiza `.env.local` e extrai credenciais de `supabase status -o env`.
 - `scripts/check-lab.mjs`: Validador do ambiente de laboratório com flags de relatório completo e exibição de IPs.
 - `scripts/mock-esp.mjs`: Simulador de bancada para desenvolvimento sem hardware, com suporte completo a leitura e cadastro em 2 toques do sensor biométrico AS608.

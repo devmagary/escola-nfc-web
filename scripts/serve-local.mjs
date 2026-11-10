@@ -19,9 +19,10 @@
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { listarInterfacesRede, listarIpsRede } from './network.mjs';
 
 /** Raiz servida: a pasta que contém `scripts/` (ou seja, escola-nfc-web). */
 export const PROJECT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -224,17 +225,12 @@ export async function handler(req, res, { root = PROJECT_ROOT } = {}) {
 
 /**
  * Lista os IPv4 da rede local para exibir no terminal.
+ * Usa a mesma regra do lab-setup: ignora interfaces virtuais e coloca o
+ * hotspot do laboratório em primeiro lugar quando ele está ligado.
  * @returns {string[]}
  */
 export function listarIpsLocais() {
-  /** @type {string[]} */
-  const ips = [];
-  for (const interfaces of Object.values(os.networkInterfaces())) {
-    for (const item of interfaces ?? []) {
-      if (item.family === 'IPv4' && !item.internal) ips.push(item.address);
-    }
-  }
-  return ips;
+  return listarIpsRede();
 }
 
 /**
@@ -274,8 +270,9 @@ export async function iniciar({ port = DEFAULT_PORT, root = PROJECT_ROOT } = {})
   process.stdout.write('🖥️  Servidor local do totem/portaria (escola-nfc-web)\n');
   process.stdout.write(`${linha}\n`);
   process.stdout.write(`   Local: http://localhost:${port}\n`);
-  for (const ip of listarIpsLocais()) {
-    process.stdout.write(`   Rede : http://${ip}:${port}\n`);
+  for (const item of listarInterfacesRede()) {
+    const rotulo = item.hotspot ? '  [hotspot]' : '';
+    process.stdout.write(`   Rede : http://${item.endereco}:${port}${rotulo}\n`);
   }
   process.stdout.write(`   Raiz : ${root}\n`);
   process.stdout.write('   Pare com Ctrl+C.\n');

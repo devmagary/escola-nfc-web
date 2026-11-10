@@ -18,10 +18,12 @@
  * ---------------------------------------------------------------------------
  */
 import { spawn } from 'node:child_process';
-import os from 'node:os';
 import process from 'node:process';
 
 import { loadEnv, validarUrlHttp } from './build-config.mjs';
+import { listarInterfacesRede, listarIpsRede } from './network.mjs';
+
+export { listarIpsRede };
 
 const LINHA = '─'.repeat(64);
 
@@ -43,32 +45,15 @@ function executar(comando, args) {
 }
 
 /**
- * Lista os IPv4 da rede física local (o tablet usa um destes endereços).
- * Exclui loopback, link-local e interfaces virtuais (WSL/Hyper-V).
- */
-export function listarIpsRede() {
-  /** @type {string[]} */
-  const ips = [];
-  for (const [alias, interfaces] of Object.entries(os.networkInterfaces())) {
-    if (/wsl|hyper|virtual|loopback|docker|vethernet/i.test(alias)) continue;
-    for (const item of interfaces ?? []) {
-      if (item.family !== 'IPv4' || item.internal) continue;
-      if (/^169\.254\./.test(item.address)) continue;
-      ips.push(item.address);
-    }
-  }
-  return [...new Set(ips)];
-}
-
-/**
  * @param {{ ip?: boolean }} args
  */
 export async function verificarLaboratorio(args = {}) {
   if (args.ip) {
     info('🖥️  Endereços do notebook na rede local (digite no tablet):');
-    for (const ip of listarIpsRede()) {
-      info(`   Painel          → http://${ip}:5500`);
-      info(`   Studio Supabase → http://${ip}:54323`);
+    for (const item of listarInterfacesRede()) {
+      const rotulo = item.hotspot ? '  [hotspot]' : '';
+      info(`   Painel          → http://${item.endereco}:5500${rotulo}`);
+      info(`   Studio Supabase → http://${item.endereco}:54323`);
     }
     return { ok: true, checks: [] };
   }
@@ -108,6 +93,18 @@ export async function verificarLaboratorio(args = {}) {
   });
   if (urlValida && anon && apontaParaLocal) ok(`Configuração aponta para o Supabase local: ${url}`);
   else { falha(mensagemConfig); dica(resultados.at(-1).comoResolver); }
+
+  // O hotspot ligado muda o IP que o tablet usa; se o .env.local ficou no IP
+  // antigo do Wi-Fi/cabo, avisa para rodar o lab:setup de novo.
+  const interfaceHotspot = listarInterfacesRede().find((item) => item.hotspot);
+  if (interfaceHotspot) {
+    ok(`Hotspot NFC-Lab ligado em ${interfaceHotspot.endereco}.`);
+  } else {
+    info('ℹ️ Hotspot NFC-Lab desligado (use lab-hotspot.cmd quando não houver rede).');
+  }
+  if (interfaceHotspot && urlValida && new URL(url).hostname !== interfaceHotspot.endereco) {
+    info(`ℹ️  Hotspot ativo: o .env.local aponta para ${new URL(url).hostname}. Rode "npm run lab:setup" para usar ${interfaceHotspot.endereco}.`);
+  }
 
   if (!url || !anon) {
     return { ok: false, checks: resultados };
@@ -204,12 +201,14 @@ export async function verificarLaboratorio(args = {}) {
   info(LINHA);
   if (tudoOk) {
     ok('LABORATÓRIO PRONTO.');
-    const ips = listarIpsRede();
-    if (ips.length === 0) {
+    const interfaces = listarInterfacesRede();
+    if (interfaces.length === 0) {
       info('   Nenhum IP de rede local detectado — confira o Wi-Fi/cabo do notebook antes de usar o tablet.');
+      info('   Sem nenhuma rede? Rode lab-hotspot.cmd para criar a rede NFC-Lab.');
     } else {
-      for (const ip of ips) {
-        info(`   No tablet: painel http://${ip}:5500 · Studio http://${ip}:54323`);
+      for (const item of interfaces) {
+        const rotulo = item.hotspot ? '  [hotspot]' : '';
+        info(`   No tablet: painel http://${item.endereco}:5500 · Studio http://${item.endereco}:54323${rotulo}`);
       }
     }
   } else {

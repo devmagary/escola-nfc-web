@@ -257,6 +257,9 @@ bool     nfcOk = false;
 bool     bioOk = false;
 String   ultimoMetodoLido = "nfc";
 uint16_t ultimoBioIdLido = 0;
+// true quando a última leitura foi uma digital que não existe no sensor.
+// O painel usa isso para mostrar "Biometria não reconhecida" na portaria.
+volatile bool ultimoBiometriaDesconhecida = false;
 
 // Máquina de estados para cadastro de biometria (Core 0 <-> API HTTP Core 1)
 volatile bool     bioCadastroAtivo = false;
@@ -472,6 +475,15 @@ void logSerial(const String& msg, const String& tipo = "info") {
 
   Serial.printf("[%s] %s\n", hora.c_str(), msg.c_str());
   if (travado) xSemaphoreGive(travaLog);
+}
+
+// Diagnóstico da biometria: registra somente falhas anormais (timeout do UART
+// ou imagem inválida), com limite de tempo para não inundar o console.
+void logFalhaBiometria(const char* etapa, int codigo) {
+  static uint32_t ultimoMs = 0;
+  if (millis() - ultimoMs < 3000) return;
+  ultimoMs = millis();
+  logSerial(String("[BIO] ") + etapa + " falhou (codigo " + String(codigo) + ")", "wa");
 }
 
 // Registra um evento lento no buffer circular e (com rate-limit) no console.
@@ -1082,6 +1094,7 @@ void processarLeituraNfc(String uidFormatado) {
   ultimoUidLido = uidFormatado;
   ultimoMetodoLido = "nfc";
   ultimoBioIdLido = 0;
+  ultimoBiometriaDesconhecida = false;
   ultimoLidoMs = millis();
   ultimoSeq++;
   xSemaphoreGive(travaUltimo);
@@ -1309,7 +1322,7 @@ bool iniciarBiometria(bool verboso) {
   uint8_t cmdVfy[5] = { 0x13, 0x00, 0x00, 0x00, 0x00 };
   uint8_t resp[8];
   uint16_t rLen = sizeof(resp);
-  int rc = bioEnviarComando(cmdVfy, sizeof(cmdVfy), resp, &rLen, 250);
+  int rc = bioEnviarComando(cmdVfy, sizeof(cmdVfy), resp, &rLen, 800);
   if (rc == 0x00) {
     if (verboso) {
       Serial.printf("Sensor Biometrico AS608/FPM10A Detectado na UART1 (RX=%d, TX=%d)!\n", BIO_RX_PIN, BIO_TX_PIN);
@@ -1326,42 +1339,47 @@ int bioCapturarImagem() {
   uint8_t cmd[1] = { 0x01 };
   uint8_t resp[4];
   uint16_t rLen = sizeof(resp);
-  return bioEnviarComando(cmd, 1, resp, &rLen, 350);
+  // O sensor óptico pode levar mais de 350 ms para expor a imagem quando o
+  // dedo está seco ou apoiado de forma imperfeita. O timeout curto fazia a
+  // leitura falhar silenciosamente na maioria das tentativas.
+  return bioEnviarComando(cmd, 1, resp, &rLen, 1200);
 }
 
 int bioImagemParaTz(uint8_t slot) {
   uint8_t cmd[2] = { 0x02, slot };
   uint8_t resp[4];
   uint16_t rLen = sizeof(resp);
-  return bioEnviarComando(cmd, 2, resp, &rLen, 400);
+  return bioEnviarComando(cmd, 2, resp, &rLen, 1500);
 }
 
 int bioCriarModelo() {
   uint8_t cmd[1] = { 0x05 };
   uint8_t resp[4];
   uint16_t rLen = sizeof(resp);
-  return bioEnviarComando(cmd, 1, resp, &rLen, 450);
+  return bioEnviarComando(cmd, 1, resp, &rLen, 1500);
 }
 
 int bioSalvarModelo(uint16_t id) {
   uint8_t cmd[4] = { 0x06, 0x01, (uint8_t)((id >> 8) & 0xFF), (uint8_t)(id & 0xFF) };
   uint8_t resp[4];
   uint16_t rLen = sizeof(resp);
-  return bioEnviarComando(cmd, 4, resp, &rLen, 500);
+  return bioEnviarComando(cmd, 4, resp, &rLen, 1500);
 }
 
 int bioExcluirModelo(uint16_t id) {
   uint8_t cmd[5] = { 0x0C, (uint8_t)((id >> 8) & 0xFF), (uint8_t)(id & 0xFF), 0x00, 0x01 };
   uint8_t resp[4];
   uint16_t rLen = sizeof(resp);
-  return bioEnviarComando(cmd, 5, resp, &rLen, 450);
+  return bioEnviarComando(cmd, 5, resp, &rLen, 1500);
 }
 
 int bioBuscarDigital(uint16_t* idEncontrado, uint16_t* score) {
-  uint8_t cmd[6] = { 0x04, 0x01, 0x00, 0x00, 0x01, 0x2C }; // páginas 0..300
+  // Páginas 1..300 (a mesma faixa usada no cadastro). A busca em 300 páginas
+  // pode levar mais de 500 ms; o timeout antigo descartava respostas válidas.
+  uint8_t cmd[6] = { 0x04, 0x01, 0x00, 0x01, 0x01, 0x2C };
   uint8_t resp[8] = {0};
   uint16_t rLen = sizeof(resp);
-  int rc = bioEnviarComando(cmd, 6, resp, &rLen, 500);
+  int rc = bioEnviarComando(cmd, 6, resp, &rLen, 2500);
   if (rc == 0x00 && rLen >= 4) {
     *idEncontrado = ((uint16_t)resp[0] << 8) | resp[1];
     *score = ((uint16_t)resp[2] << 8) | resp[3];
@@ -1421,6 +1439,7 @@ void processarLeituraBiometria(uint16_t bioId) {
   ultimoUidLido = uidResolvido;
   ultimoMetodoLido = "biometria";
   ultimoBioIdLido = bioId;
+  ultimoBiometriaDesconhecida = false;
   ultimoLidoMs = millis();
   ultimoSeq++;
   ultimoCadastrado = encontrado;
@@ -1470,13 +1489,16 @@ void processarCicloBiometria(uint32_t& ultimoVistoBioMs) {
 
     String etapaCadastro = bioEtapaAtual();
     if (etapaCadastro == "aguardando_dedo_1") {
-      if (bioCapturarImagem() == 0x00) {
+      int rcBio = bioCapturarImagem();
+      if (rcBio == 0x00) {
         if (bioImagemParaTz(1) == 0x00) {
           bioDefinirEtapa("remova_dedo", "1a leitura capturada! Retire o dedo do sensor...");
           acionarLedFeedback(0, 140, 255, 800);
         } else {
           bioDefinirEtapa("aguardando_dedo_1", "Imagem borrada. Tente encostar o dedo novamente...");
         }
+      } else if (rcBio != 0x02) {
+        logFalhaBiometria("Captura (1a leitura)", rcBio);
       }
       return;
     }
@@ -1489,7 +1511,8 @@ void processarCicloBiometria(uint32_t& ultimoVistoBioMs) {
     }
 
     if (etapaCadastro == "aguardando_dedo_2") {
-      if (bioCapturarImagem() == 0x00) {
+      int rcBio = bioCapturarImagem();
+      if (rcBio == 0x00) {
         uint16_t idGravado = bioCadastroId;
         if (bioImagemParaTz(2) == 0x00 &&
             bioCriarModelo() == 0x00 &&
@@ -1504,6 +1527,8 @@ void processarCicloBiometria(uint32_t& ultimoVistoBioMs) {
           acionarLedFeedback(255, 0, 0, 1800);
           logSerial("[BIO] Falha ao combinar digitais na posicao #" + String(idGravado), "err");
         }
+      } else if (rcBio != 0x02) {
+        logFalhaBiometria("Captura (2a leitura)", rcBio);
       }
       return;
     }
@@ -1512,6 +1537,9 @@ void processarCicloBiometria(uint32_t& ultimoVistoBioMs) {
 
   // Modo 2: Leitura passiva contínua na portaria (1:N)
   int rcImg = bioCapturarImagem();
+  if (rcImg != 0x00 && rcImg != 0x02) {
+    logFalhaBiometria("Captura passiva", rcImg);
+  }
   if (rcImg == 0x00) {
     if (bioImagemParaTz(1) == 0x00) {
       uint16_t idEncontrado = 0;
@@ -1528,6 +1556,19 @@ void processarCicloBiometria(uint32_t& ultimoVistoBioMs) {
       } else {
         if (agora - ultimoVistoBioMs >= 2000) {
           ultimoVistoBioMs = agora;
+          // Publica a tentativa desconhecida para a tela da Portaria exibir
+          // "Biometria não reconhecida" junto com o LED vermelho.
+          xSemaphoreTake(travaUltimo, portMAX_DELAY);
+          ultimoUidLido = "";
+          ultimoMetodoLido = "biometria";
+          ultimoBioIdLido = 0;
+          ultimoBiometriaDesconhecida = true;
+          ultimoLidoMs = millis();
+          ultimoSeq++;
+          ultimoCadastrado = false;
+          ultimoNomeLido = "";
+          xSemaphoreGive(travaUltimo);
+
           logSerial("BIOMETRIA NAO RECONHECIDA no sensor optico", "wa");
           acionarLedFeedback(255, 0, 0, 1400);
         }
@@ -2038,6 +2079,7 @@ void rotaUltimoCartao() {
   // Copia o estado sob trava antes de serializar: as Strings são escritas no Core 0.
   String uid, nome, metodo;
   bool cadastrado = false;
+  bool biometriaDesconhecida = false;
   uint32_t seq = 0, lidoMs = 0;
   uint16_t bioId = 0;
 
@@ -2047,6 +2089,7 @@ void rotaUltimoCartao() {
   cadastrado = ultimoCadastrado;
   metodo = ultimoMetodoLido;
   bioId = ultimoBioIdLido;
+  biometriaDesconhecida = ultimoBiometriaDesconhecida;
   seq = ultimoSeq;
   lidoMs = ultimoLidoMs;
   xSemaphoreGive(travaUltimo);
@@ -2060,6 +2103,7 @@ void rotaUltimoCartao() {
     doc["nome"] = nome;
     doc["cadastrado"] = cadastrado;
     doc["metodo"] = metodo;
+    doc["biometria_desconhecida"] = biometriaDesconhecida;
     if (bioId > 0) doc["bio_id"] = bioId;
     doc["ha"] = (millis() - lidoMs) / 1000;
   }
@@ -3297,6 +3341,9 @@ void iniciarConexaoWiFi() {
 
 void setup() {
   Serial.begin(115200);
+  // A USB CDC não pode bloquear o Core 0 quando o Monitor Serial está fechado.
+  // Sem isso, um log podia travar a tarefa NFC/biometria e o servidor web.
+  Serial.setTxTimeoutMs(0);
   uint32_t t0 = millis();
   while (!Serial && millis() - t0 < 2500) delay(10);
 

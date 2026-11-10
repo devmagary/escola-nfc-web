@@ -2,17 +2,17 @@
 # lab-menu.ps1 — TUI unificada do laboratório offline (Acesso Escolar NFC)
 # ---------------------------------------------------------------------------
 # Tela única (24 linhas, cabe na janela padrão) com:
-#   - luzes ao vivo: Docker, Banco, Painel e Placa ESP32 (medidas por um
-#     processo de fundo; a TUI só lê um arquivo, então o teclado nunca espera)
-#   - menu completo: ligar, desligar, checar, abrir painel, endereços,
-#     firewall, backup e recomeçar do zero
+#   - luzes ao vivo: Docker, Banco, Painel, Placa ESP32 e Hotspot (medidas por
+#     um processo de fundo; a TUI só lê um arquivo, então o teclado nunca espera)
+#   - menu completo: ligar/desligar, checar, abrir painel, endereços, hotspot,
+#     firewall, backup, recomeçar do zero e configurar
 #
 # Ações diretas (para atalhos/scripts):
-#   lab-menu.ps1 -Acao ligar|desligar|checar|enderecos|backup|zerar
+#   lab-menu.ps1 -Acao ligar|desligar|checar|enderecos|hotspot|backup|zerar
 #
-# Desempenho: desenho pela API do console ([Console]::Write), sem Write-Host no
-# laço de teclado; polling de 10 ms (latência imperceptível); luzes a cada 0,7 s
-# lendo JSON de ~1 KB. Compatível com Windows PowerShell 5.1.
+# Desempenho: polling de 25 ms (latência imperceptível); luzes a cada 0,8 s com
+# cache (só redesenha quando mudam); estado em processo separado, com Docker
+# por named pipe e Banco/Painel por TCP. Compatível com Windows PowerShell 5.1.
 # =============================================================================
 param([string]$Acao = '', [switch]$SemPausa)
 
@@ -53,11 +53,92 @@ function Testar-Painel {
 }
 
 function Pegar-IP {
-  $ip = Get-NetIPAddress -AddressFamily IPv4 |
-    Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
-    Where-Object { $_.InterfaceAlias -notmatch 'vEthernet|Hyper|WSL|Docker|Loopback' } |
+  $padraoVirtual = 'Tailscale|ZeroTier|WSL|Hyper|Docker|vEthernet|Loopback|Bluetooth|Virtual|VMware|TAP|TUN|VPN|WireGuard'
+  $padraoIgnorado = '^(127\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.)'
+  $ip = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -notmatch $padraoIgnorado -and $_.InterfaceAlias -notmatch $padraoVirtual } |
+    Sort-Object @{ Expression = {
+      if ($_.IPAddress -eq '192.168.137.1') { 0 }
+      elseif ($_.InterfaceAlias -match 'Wi-?Fi|WLAN|Ethernet') { 1 }
+      else { 2 }
+    } } |
     Select-Object -First 1 -ExpandProperty IPAddress
   return $ip
+}
+
+function Ler-EnvLocal {
+  $valores = @{}
+  $caminho = Join-Path $script:Projeto '.env.local'
+  if (-not (Test-Path $caminho)) { return $valores }
+  foreach ($linha in (Get-Content $caminho -ErrorAction SilentlyContinue)) {
+    if ($linha -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') {
+      $valor = $Matches[2].Trim()
+      if (($valor.StartsWith('"') -and $valor.EndsWith('"')) -or ($valor.StartsWith("'") -and $valor.EndsWith("'"))) {
+        $valor = $valor.Substring(1, $valor.Length - 2)
+      }
+      $valores[$Matches[1]] = $valor
+    }
+  }
+  return $valores
+}
+
+function Pegar-ModoHotspot {
+  $modo = (Ler-EnvLocal)['LAB_HOTSPOT_MODO']
+  if ($modo -notin @('auto', 'sempre', 'nunca')) { return 'auto' }
+  return $modo
+}
+
+function Hotspot-Ligado {
+  return [bool](Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -eq '192.168.137.1' } | Select-Object -First 1)
+}
+
+function Iniciar-Hotspot {
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:Projeto 'lab-hotspot.ps1') -Acao ligar
+  Start-Sleep -Seconds 1
+  return (Hotspot-Ligado)
+}
+
+function Parar-Hotspot {
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:Projeto 'lab-hotspot.ps1') -Acao desligar
+  Start-Sleep -Seconds 1
+  return -not (Hotspot-Ligado)
+}
+
+function Iniciar-Painel {
+  if (Testar-Painel) { return $true }
+  Start-Process -FilePath 'cmd.exe' -ArgumentList ("/k cd /d `"$script:Projeto`" && title Painel NFC (nao fechar) && npm run lab:dev")
+  for ($espera = 1; $espera -le 15; $espera++) {
+    Start-Sleep -Seconds 1
+    if (Testar-Painel) { return $true }
+    Write-Host ("    subindo o painel... ({0})" -f $espera) -ForegroundColor DarkGray
+  }
+  return $false
+}
+
+function Parar-Painel {
+  $null = & cmd /c 'taskkill /FI "WINDOWTITLE eq Painel NFC*" /T /F >nul 2>&1'
+  # Garante o encerramento do node que segura a porta 5500, mesmo que a janela
+  # do cmd tenha ficado sem título ou o filho tenha sido reparentado.
+  try {
+    $conexoes = Get-NetTCPConnection -LocalPort 5500 -State Listen -ErrorAction SilentlyContinue
+    foreach ($conexao in $conexoes) {
+      Stop-Process -Id $conexao.OwningProcess -Force -ErrorAction SilentlyContinue
+    }
+  } catch { }
+
+  for ($tentativa = 1; $tentativa -le 10; $tentativa++) {
+    Start-Sleep -Milliseconds 200
+    if (-not (Testar-Painel)) { return $true }
+  }
+  return $false
+}
+
+function Reiniciar-Painel {
+  if (-not (Testar-Painel)) { return $false }
+  $null = Parar-Painel
+  Start-Sleep -Milliseconds 300
+  return (Iniciar-Painel)
 }
 
 function Escrever-Positivo { param([string]$Texto) Write-Host ("  [OK]  " + $Texto) -ForegroundColor Green }
@@ -70,9 +151,13 @@ function Escrever-Negativo { param([string]$Texto) Write-Host ("  [XX]  " + $Tex
 $script:CaminhoEstado = Join-Path $env:TEMP ("lab-nfc-estado-{0}.json" -f $PID)
 $script:EstadoProc = $null
 $script:EstadoAtual = $null
+$script:UltimoEstadoTexto = ''
 
 function Iniciar-Estado {
   Remove-Item $script:CaminhoEstado -ErrorAction SilentlyContinue
+  $script:UltimoEstadoTexto = ''
+  $script:EstadoAtual = $null
+  $script:UltimasLuzes = ''
   $argumentos = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -Projeto "{1}" -Caminho "{2}" -PidPai {3}' -f `
     (Join-Path $script:Projeto 'lab-estado.ps1'), $script:Projeto, $script:CaminhoEstado, $PID
   $script:EstadoProc = Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -PassThru -ArgumentList $argumentos
@@ -83,13 +168,19 @@ function Parar-Estado {
     try { Stop-Process -Id $script:EstadoProc.Id -Force -ErrorAction SilentlyContinue } catch { }
   }
   $script:EstadoProc = $null
+  $script:UltimoEstadoTexto = ''
+  $script:EstadoAtual = $null
+  $script:UltimasLuzes = ''
   Remove-Item $script:CaminhoEstado -ErrorAction SilentlyContinue
 }
 
 function Ler-Estado {
   try {
     $texto = [System.IO.File]::ReadAllText($script:CaminhoEstado, [System.Text.Encoding]::UTF8)
-    return ($texto | ConvertFrom-Json)
+    if ($texto -eq $script:UltimoEstadoTexto) { return $script:EstadoAtual }
+    $script:UltimoEstadoTexto = $texto
+    $script:EstadoAtual = $texto | ConvertFrom-Json
+    return $script:EstadoAtual
   } catch { return $null }
 }
 
@@ -102,7 +193,36 @@ function Iniciar-Laboratorio {
   Write-Host '  1) Docker Desktop' -ForegroundColor White
   if (-not (Esperar-Docker)) { return }
 
-  Write-Host '  2) Banco de dados (Supabase local, dentro do Docker)' -ForegroundColor White
+  Write-Host '  2) Rede local (hotspot NFC-Lab / Wi-Fi)' -ForegroundColor White
+  $modo = Pegar-ModoHotspot
+  Write-Host ("  modo do hotspot: {0}" -f $modo) -ForegroundColor DarkGray
+  $ip = Pegar-IP
+  $hotspotAtivo = Hotspot-Ligado
+
+  if ($hotspotAtivo) {
+    Escrever-Positivo 'hotspot NFC-Lab já está ligado.'
+    $ip = Pegar-IP
+  } elseif ($modo -eq 'sempre' -or ($modo -eq 'auto' -and -not $ip)) {
+    Write-Host '  Criando o hotspot NFC-Lab (sem internet)...' -ForegroundColor Yellow
+    try {
+      if (Iniciar-Hotspot) { Escrever-Positivo 'hotspot ligado.' }
+      else { Escrever-Negativo 'o hotspot não subiu; confira o Wi-Fi do notebook.' }
+    } catch {
+      Escrever-Negativo ('não foi possível criar o hotspot: ' + $_.Exception.Message)
+    }
+    $ip = Pegar-IP
+  } elseif ($ip) {
+    Escrever-Positivo ('Wi-Fi/cabo encontrado: {0}' -f $ip)
+  } else {
+    Escrever-Negativo 'nenhuma rede encontrada. Use LAB_HOTSPOT_MODO=sempre ou lab-hotspot.cmd.'
+  }
+
+  if ($ip) {
+    if ($ip -eq '192.168.137.1') { Escrever-Positivo ('IP do hotspot: {0}' -f $ip) }
+    else { Escrever-Positivo ('IP da rede: {0}' -f $ip) }
+  }
+
+  Write-Host '  3) Banco de dados (Supabase local, dentro do Docker)' -ForegroundColor White
   if (Testar-Supabase) {
     Escrever-Positivo 'o banco já está no ar.'
   } else {
@@ -118,37 +238,111 @@ function Iniciar-Laboratorio {
     else { Escrever-Negativo 'o banco não respondeu. Use a opção Checar para ver o detalhe.' }
   }
 
-  Write-Host '  3) Painel (site do laboratório)' -ForegroundColor White
-  if (Testar-Painel) {
-    Escrever-Positivo 'o painel já está no ar (deve haver uma janela "Painel NFC" aberta).'
+  if ($ip -eq '192.168.137.1' -and -not (Hotspot-Ligado)) {
+    Write-Host '  O hotspot desligou durante a subida; religando...' -ForegroundColor Yellow
+    if (Iniciar-Hotspot) { $ip = Pegar-IP }
+  }
+
+  if ($ip) {
+    Write-Host '  Atualizando o .env.local com o IP atual...' -ForegroundColor DarkGray
+    & node (Join-Path $script:Projeto 'scripts\lab-setup.mjs')
   } else {
-    Start-Process -FilePath 'cmd.exe' -ArgumentList ("/k cd /d `"$script:Projeto`" && title Painel NFC (nao fechar) && npm run lab:dev")
-    $ligou = $false
-    for ($espera = 1; $espera -le 15; $espera++) {
-      Start-Sleep -Seconds 2
-      if (Testar-Painel) { $ligou = $true; break }
-      Write-Host ("    subindo o painel... ({0})" -f $espera) -ForegroundColor DarkGray
-    }
-    if ($ligou) { Escrever-Positivo 'painel ligado. Abriu uma janela "Painel NFC": NÃO feche ela, é o site.' }
+    Write-Host '  Aviso: sem IP de rede; o .env.local não foi atualizado.' -ForegroundColor Yellow
+  }
+
+  Write-Host '  4) Painel (site do laboratório)' -ForegroundColor White
+  if (Testar-Painel) {
+    Escrever-Positivo 'o painel já está no ar (janela "Painel NFC").'
+  } else {
+    Write-Host '  Abrindo a janela "Painel NFC"...' -ForegroundColor DarkGray
+    if (Iniciar-Painel) { Escrever-Positivo 'painel ligado. NÃO feche a janela "Painel NFC".' }
     else { Escrever-Negativo 'o painel demorou; olhe a janela "Painel NFC" para ver o que aconteceu.' }
   }
 
-  $ip = Pegar-IP
   Write-Host ''
   if ($ip) { Write-Host ("  PRONTO. No tablet: http://{0}:5500   (no computador: http://localhost:5500)" -f $ip) -ForegroundColor Green }
-  else { Write-Host '  PRONTO. Sem IP de rede visível: confira o Wi-Fi/cabo antes de usar o tablet.' -ForegroundColor Yellow }
+  else { Write-Host '  PRONTO. Sem IP de rede visível: confira o Wi-Fi/cabo ou rode lab-hotspot.cmd.' -ForegroundColor Yellow }
 }
 
 function Parar-Laboratorio {
   Write-Host ''
   Write-Host '  1) Fechando a janela do painel...' -ForegroundColor White
-  $null = & cmd /c 'taskkill /FI "WINDOWTITLE eq Painel NFC*" /T /F >nul 2>&1'
-  if (Testar-Painel) { Write-Host '  ainda há um painel no ar de outra janela: feche-a com Ctrl+C.' -ForegroundColor Yellow }
-  else { Escrever-Positivo 'painel fora do ar.' }
+  if (Parar-Painel) { Escrever-Positivo 'painel fora do ar.' }
+  else { Write-Host '  ainda há um painel no ar de outra janela: feche-a com Ctrl+C.' -ForegroundColor Yellow }
 
   Write-Host '  2) Guardando o banco de dados...' -ForegroundColor White
   if (-not (Testar-Supabase)) { Write-Host '  o banco já estava parado.' -ForegroundColor DarkGray }
   else { Npm 'lab:stop'; Escrever-Positivo 'banco guardado nos caixotes do Docker. Nada foi apagado.' }
+
+  Write-Host '  3) Hotspot do laboratório...' -ForegroundColor White
+  if (-not (Hotspot-Ligado)) {
+    Write-Host '  o hotspot já estava desligado.' -ForegroundColor DarkGray
+  } else {
+    if (Parar-Hotspot) { Escrever-Positivo 'hotspot desligado; o Wi-Fi normal continua como estava.' }
+    else { Escrever-Negativo 'não foi possível desligar o hotspot.' }
+  }
+
+  # Se o hotspot saiu e existe outra rede, volta o .env.local para o IP dela.
+  $padraoVirtual = 'Tailscale|ZeroTier|WSL|Hyper|Docker|vEthernet|Loopback|Bluetooth|Virtual|VMware|TAP|TUN|VPN|WireGuard'
+  $outraRede = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object {
+      $_.IPAddress -ne '192.168.137.1' -and
+      $_.IPAddress -notmatch '^(127\.|169\.254\.|100\.)' -and
+      $_.InterfaceAlias -notmatch $padraoVirtual
+    } | Select-Object -First 1
+  if ($outraRede) {
+    & node (Join-Path $script:Projeto 'scripts\lab-setup.mjs') | Out-Null
+    Write-Host '  .env.local voltou para o IP do Wi-Fi/cabo.' -ForegroundColor DarkGray
+  }
+}
+
+function Alternar-Hotspot {
+  Write-Host ''
+  if (Hotspot-Ligado) {
+    $padraoVirtual = 'Tailscale|ZeroTier|WSL|Hyper|Docker|vEthernet|Loopback|Bluetooth|Virtual|VMware|TAP|TUN|VPN|WireGuard'
+    $outraRede = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+      Where-Object {
+        $_.IPAddress -ne '192.168.137.1' -and
+        $_.IPAddress -notmatch '^(127\.|169\.254\.|100\.)' -and
+        $_.InterfaceAlias -notmatch $padraoVirtual
+      } | Select-Object -First 1
+
+    if (-not $outraRede) {
+      Write-Host '  ATENÇÃO: não há Wi-Fi/cabo conectado. Desligar o hotspot deixará o laboratório sem rede.' -ForegroundColor Yellow
+    }
+    $resposta = Read-Host '  Desligar o hotspot NFC-Lab? O tablet perde a rede. (S/N)'
+    if ($resposta -notmatch '^[sS]') { Write-Host '  Cancelado. Nada mudou.' -ForegroundColor Yellow; return }
+
+    Write-Host '  Desligando o hotspot...' -ForegroundColor Yellow
+    if (-not (Parar-Hotspot)) { Escrever-Negativo 'não foi possível desligar o hotspot.'; return }
+    Escrever-Positivo 'hotspot desligado.'
+
+    Write-Host '  Atualizando o .env.local para o IP do Wi-Fi/cabo...' -ForegroundColor DarkGray
+    if ($outraRede) { & node (Join-Path $script:Projeto 'scripts\lab-setup.mjs') }
+    else { Write-Host '  Sem outra rede: o .env.local ficou como estava.' -ForegroundColor Yellow }
+
+    if (Testar-Painel) {
+      Write-Host '  Reiniciando o painel para usar o novo IP...' -ForegroundColor DarkGray
+      if (Reiniciar-Painel) { Escrever-Positivo 'painel reiniciado.' }
+      else { Escrever-Negativo 'reinicie o painel manualmente (feche a janela e use Ligar tudo).' }
+    }
+    return
+  }
+
+  Write-Host '  Ligando o hotspot NFC-Lab...' -ForegroundColor Yellow
+  if (-not (Iniciar-Hotspot)) { Escrever-Negativo 'o hotspot não subiu; confira o Wi-Fi do notebook.'; return }
+  Escrever-Positivo 'hotspot ligado.'
+
+  Write-Host '  Atualizando o .env.local para 192.168.137.1...' -ForegroundColor DarkGray
+  & node (Join-Path $script:Projeto 'scripts\lab-setup.mjs')
+
+  if (Testar-Painel) {
+    Write-Host '  Reiniciando o painel para usar o hotspot...' -ForegroundColor DarkGray
+    if (Reiniciar-Painel) { Escrever-Positivo 'painel reiniciado; no tablet use http://192.168.137.1:5500.' }
+    else { Escrever-Negativo 'reinicie o painel manualmente (feche a janela e use Ligar tudo).' }
+  } else {
+    Write-Host '  O painel não está aberto. Use "Ligar tudo" para subir com o hotspot.' -ForegroundColor DarkGray
+  }
 }
 
 function Checar-Laboratorio {
@@ -185,7 +379,8 @@ function Liberar-Firewall {
   Write-Host ''
   Write-Host '  Vai abrir uma janela pedindo permissão de administrador: clique em "Sim".' -ForegroundColor Yellow
   Start-Process -FilePath 'cmd.exe' -ArgumentList ("/c `"$script:Projeto\lab-firewall-liberar.cmd`"")
-  Write-Host '  (É o mesmo lab-firewall-liberar.cmd: libera o painel e o banco na rede da escola.)' -ForegroundColor DarkGray
+  Write-Host '  Libera 80/5500/54321/54323 só para a sub-rede do notebook,' -ForegroundColor DarkGray
+  Write-Host '  mesmo que o Windows classifique o Wi-Fi ou o hotspot como "Pública".' -ForegroundColor DarkGray
 }
 
 function Fazer-Backup {
@@ -234,6 +429,7 @@ $script:Opcoes = @(
   @{ Texto = 'Checar a saúde do laboratório';         Valor = 'checar' }
   @{ Texto = 'Abrir o painel no navegador';           Valor = 'abrir' }
   @{ Texto = 'Ver os endereços para o tablet';        Valor = 'enderecos' }
+  @{ Texto = 'Hotspot NFC-Lab: ligar/desligar';       Valor = 'hotspot' }
   @{ Texto = 'Liberar o firewall da rede da escola';  Valor = 'firewall' }
   @{ Texto = 'Fazer backup dos dados';                Valor = 'backup' }
   @{ Texto = 'Recomeçar do zero (APAGA cadastros!)';  Valor = 'zerar' }
@@ -245,8 +441,9 @@ $script:Mensagens = New-Object System.Collections.Generic.List[string]
 $script:Largura = 70
 $script:LinhaLuzes = 3
 $script:LinhaMenu = 5
-$script:LinhaLog = 17
-$script:LogMax = 6
+$script:LinhaLog = 18
+$script:LogMax = 5
+$script:UltimasLuzes = ''
 
 function Pintar {
   param(
@@ -275,18 +472,27 @@ function Desenhar-Luzes {
     $celulas += , @('Banco: ...', [ConsoleColor]::DarkGray)
     $celulas += , @('Painel: ...', [ConsoleColor]::DarkGray)
     $celulas += , @('Placa: ...', [ConsoleColor]::DarkGray)
+    $celulas += , @('Hotspot: ...', [ConsoleColor]::DarkGray)
   } else {
-    if ($estado.docker) { $celulas += , @('Docker: ligado', [ConsoleColor]::Green) } else { $celulas += , @('Docker: parado', [ConsoleColor]::Red) }
-    if ($estado.banco)  { $celulas += , @('Banco: ligado',  [ConsoleColor]::Green) } else { $celulas += , @('Banco: parado',  [ConsoleColor]::Red) }
-    if ($estado.painel) { $celulas += , @('Painel: ligado', [ConsoleColor]::Green) } else { $celulas += , @('Painel: parado', [ConsoleColor]::Red) }
-    if ($estado.placa -eq 2)     { $celulas += , @('Placa: pronta',      [ConsoleColor]::Green) }
-    elseif ($estado.placa -eq 1) { $celulas += , @('Placa: leitor fora', [ConsoleColor]::Yellow) }
-    else                         { $celulas += , @('Placa: ausente',     [ConsoleColor]::Red) }
+    if ($estado.docker) { $celulas += , @('Docker: ok', [ConsoleColor]::Green) } else { $celulas += , @('Docker: off', [ConsoleColor]::Red) }
+    if ($estado.banco)  { $celulas += , @('Banco: ok',  [ConsoleColor]::Green) } else { $celulas += , @('Banco: off',  [ConsoleColor]::Red) }
+    if ($estado.painel) { $celulas += , @('Painel: ok', [ConsoleColor]::Green) } else { $celulas += , @('Painel: off', [ConsoleColor]::Red) }
+    if ($estado.placa -eq 2)     { $celulas += , @('Placa: ok',    [ConsoleColor]::Green) }
+    elseif ($estado.placa -eq 1) { $celulas += , @('Placa: leitor', [ConsoleColor]::Yellow) }
+    else                         { $celulas += , @('Placa: off',   [ConsoleColor]::Red) }
+    if ($estado.hotspot) { $celulas += , @('Hotspot: ok', [ConsoleColor]::Green) }
+    else                 { $celulas += , @('Hotspot: off', [ConsoleColor]::DarkGray) }
   }
-  $x = 4
+
+  # Só redesenha quando o texto das luzes muda (evita writes desnecessários).
+  $assinatura = (($celulas | ForEach-Object { $_[0] }) -join '|')
+  if ($assinatura -eq $script:UltimasLuzes) { return }
+  $script:UltimasLuzes = $assinatura
+
+  $x = 3
   foreach ($celula in $celulas) {
-    Pintar $x $script:LinhaLuzes ($celula[0].PadRight(18)) $celula[1]
-    $x += 18
+    Pintar $x $script:LinhaLuzes ($celula[0].PadRight(13)) $celula[1]
+    $x += 13
   }
 }
 
@@ -328,11 +534,12 @@ function Desenhar-Quadro {
   Pintar 5 1 'ACESSO ESCOLAR NFC - LABORATORIO OFFLINE (sem internet)' ([ConsoleColor]::White)
   Pintar 2 2 $fina ([ConsoleColor]::Cyan)
   Pintar 2 4 $fina ([ConsoleColor]::Cyan)
-  Pintar 2 15 $fina ([ConsoleColor]::Cyan)
-  Pintar 4 16 'MENSAGENS:' ([ConsoleColor]::DarkCyan)
+  Pintar 2 16 $fina ([ConsoleColor]::Cyan)
+  Pintar 4 17 'MENSAGENS:' ([ConsoleColor]::DarkCyan)
   Pintar 2 23 $fina ([ConsoleColor]::Cyan)
-  Pintar 4 24 'Setas + Enter (ou números 1-9). ESC sai. Luzes atualizam sozinhas.' ([ConsoleColor]::DarkGray)
+  Pintar 4 24 'Setas + Enter · números 1-9 · 0 sai · luzes ao vivo' ([ConsoleColor]::DarkGray)
   for ($i = 0; $i -lt $script:Opcoes.Count; $i++) { Desenhar-MenuItem -Indice $i -Selecionado $false }
+  $script:UltimasLuzes = ''
   Desenhar-Luzes
   Repintar-Mensagens
   Desenhar-MenuItem -Indice 0 -Selecionado $true
@@ -372,6 +579,8 @@ function Ler-Opcao {
     'D8'         { return @{ Indice = 7; Escolheu = $true } }
     'NumPad9'    { return @{ Indice = 8; Escolheu = $true } }
     'D9'         { return @{ Indice = 8; Escolheu = $true } }
+    'NumPad0'    { return @{ Indice = $total - 1; Escolheu = $true } }
+    'D0'         { return @{ Indice = $total - 1; Escolheu = $true } }
   }
   return @{ Indice = $Selecionado; Escolheu = $false }
 }
@@ -383,7 +592,7 @@ function Ler-Opcao {
 function Rodar-TUI {
   $selecionado = 0
   Desenhar-Quadro
-  Mensagem 'Bem-vindo! Verde = no ar. Setas + Enter, ou número. ESC sai.'
+  Mensagem 'Bem-vindo! Verde = no ar. Setas/Enter, 1-9; 0 ou ESC sai.'
   try { Iniciar-Estado } catch { }
   $relogioLuzes = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -408,10 +617,11 @@ function Rodar-TUI {
         try { [Console]::Clear() } catch { }
         switch ($escolhido) {
           'ligar'     { Iniciar-Laboratorio;      Mensagem 'Ligar: subida concluída (veja [OK]/[XX] acima).' }
-          'desligar'  { Parar-Laboratorio;        Mensagem 'Desligar: painel fechado e banco guardado.' }
+          'desligar'  { Parar-Laboratorio;        Mensagem 'Desligar: painel fechado, banco guardado e hotspot desligado.' }
           'checar'    { Checar-Laboratorio;       Mensagem 'Checar: diagnóstico concluído; [OK] verde significa tudo bem.' }
           'abrir'     { Abrir-PainelNoNavegador;  Mensagem 'Abrir: navegador enviado ao painel.' }
           'enderecos' { Ver-Enderecos;            Mensagem 'Endereços: mostrados acima (digite no tablet).' }
+          'hotspot'   { Alternar-Hotspot;         Mensagem 'Hotspot: ação concluída (veja o resumo acima).' }
           'configurar' { Configurar-Laboratorio -Perguntar; Mensagem 'Configurar: IP e chaves atualizados no .env.local (veja o resumo acima).' }
           'firewall'  { Liberar-Firewall;         Mensagem 'Firewall: confirme com "Sim" na janela do Windows.' }
           'backup'    { Fazer-Backup;             Mensagem 'Backup: salvo em supabase\backup.sql.' }
@@ -425,8 +635,8 @@ function Rodar-TUI {
         $relogioLuzes.Restart()
       }
     } else {
-      Start-Sleep -Milliseconds 10
-      if ($relogioLuzes.ElapsedMilliseconds -ge 700) {
+      Start-Sleep -Milliseconds 25
+      if ($relogioLuzes.ElapsedMilliseconds -ge 800) {
         Desenhar-Luzes
         $relogioLuzes.Restart()
       }
@@ -445,13 +655,16 @@ try {
       'desligar'  { Parar-Laboratorio }
       'checar'    { Checar-Laboratorio }
       'enderecos' { Ver-Enderecos }
+      'hotspot'   { Alternar-Hotspot }
       'configurar' { Configurar-Laboratorio }
       'backup'    { Fazer-Backup }
       'zerar'     { Zerar-Laboratorio }
       default     { Write-Host ("Ação desconhecida: " + $Acao) -ForegroundColor Red }
     }
     Write-Host ''
+    $global:LASTEXITCODE = 0
     if (-not $SemPausa) { $null = Read-Host 'Aperte Enter para fechar esta janela' }
+    exit 0
   } else {
     Rodar-TUI
   }

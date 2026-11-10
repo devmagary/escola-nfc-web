@@ -37,3 +37,6 @@ Thumbs.db
 
 # Arquivos temporarios do Office (Word/Excel abertos)
 ~$*
+
+# Logs do monitor do ESP32 (gerados localmente)
+/logs/

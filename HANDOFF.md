@@ -42,6 +42,8 @@ flowchart TD
     subgraph OPERACAO["Interface do Operador Windows"]
         TUI["Menu TUI Windows\nlab.cmd / lab-menu.ps1"] --> DOCKER_STACK
         TUI --> LAB_SRV
+        HOT["Hotspot Wi-Fi NFC-Lab\n192.168.137.1 (sem internet)"] --> LAB_SRV
+        HOT --> DOCKER_STACK
     end
 ```
 
@@ -121,16 +123,18 @@ O sistema unifica a identificação escolar em três modalidades sem qualquer co
 
 ### 7.1 Automação e Ferramentas de Terminal Windows
 - `lab.cmd`: Atalho de execução para `lab-menu.ps1`.
-- `lab-menu.ps1`: Menu TUI de 24 linhas para ligar/desligar Docker, monitorar serviços e abrir portais.
-- `lab-estado.ps1`: Daemon de checagem periódica das portas de rede (54321, 54322, 54323, 5500, 8080).
+- `lab-menu.ps1`: Menu TUI de 24 linhas para ligar/desligar Docker, monitorar serviços, alternar o hotspot e abrir portais.
+- `lab-estado.ps1`: Daemon de checagem periódica das portas de rede (54321, 54322, 54323, 5500, 8080) e do hotspot.
+- `lab-hotspot.ps1` / `lab-hotspot.cmd` / `lab-hotspot-desligar.cmd`: Criam/desligam a rede Wi-Fi `NFC-Lab` em `192.168.137.1` sem internet.
 - `lab-ligar.cmd`: Script em lote para inicialização rápida da pilha Supabase e servidor local.
 - `lab-desligar.cmd`: Encerramento seguro de contêineres Docker.
 - `lab-checar.cmd`: Diagnóstico instantâneo de conectividade e integridade.
-- `lab-firewall-liberar.cmd`: Criação de regras de firewall para as portas do laboratório.
-- `lab-criar-atalhos.cmd` / `lab-atalhos.ps1`: Criação de atalhos no Desktop do operador.
+- `lab-firewall-liberar.cmd`: Criação de regras de firewall para as portas do laboratório (Wi-Fi, cabo e hotspot).
+- `lab-criar-atalhos.cmd` / `lab-atalhos.ps1`: Criação de atalhos no Desktop do operador ("Servidor NFC" e "Hotspot NFC").
 
 ### 7.2 Scripts Node.js (`scripts/`)
 - `scripts/serve-local.mjs`: Servidor HTTP de arquivos estáticos e proxy local (porta 5500).
+- `scripts/network.mjs`: Escolha do IP do notebook, ignorando interfaces virtuais e priorizando o hotspot.
 - `scripts/lab-setup.mjs`: Configuração automática de IP da rede e variáveis no `.env.local`.
 - `scripts/check-lab.mjs`: Validador de portas, contêineres e credenciais.
 - `scripts/mock-esp.mjs`: Simulador completo do ESP32 para desenvolvimento sem hardware físico (porta 8080).

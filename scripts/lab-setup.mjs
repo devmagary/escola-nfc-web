@@ -24,10 +24,11 @@
  */
 import { exec } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+
+import { ehHotspotWindows, escolherIpPrincipal, listarIpsRede } from './network.mjs';
 
 export const PROJECT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const ARQUIVO_MODELO = '.env.lab.example';
@@ -38,21 +39,13 @@ export const PLACEHOLDER_SERVICE = 'COLE-A-SERVICE-ROLE-KEY-DO-LAB-AQUI';
 
 /**
  * Lista IPv4 utilizáveis da rede física, na ordem em que aparecerem.
- * Interfaces virtuais (WSL, Hyper-V, Docker, loopback) ficam de fora.
- * @param {NodeJS.Dict<os.NetworkInterfaceInfo[]>} interfaces
+ * Interfaces virtuais (WSL, Hyper-V, Docker, Tailscale, ZeroTier, loopback)
+ * ficam de fora. Mantido como API pública porque os testes usam este nome.
+ * @param {NodeJS.Dict<import('node:os').NetworkInterfaceInfo[]>} interfaces
  * @returns {string[]}
  */
 export function escolherIps(interfaces) {
-  const ips = [];
-  for (const [apelido, itens] of Object.entries(interfaces || {})) {
-    if (/wsl|hyper|virtual|loopback|docker|vethernet/i.test(apelido)) continue;
-    for (const item of itens || []) {
-      if (item.family !== 'IPv4' || item.internal) continue;
-      if (/^169\.254\./.test(item.address)) continue;
-      ips.push(item.address);
-    }
-  }
-  return [...new Set(ips)];
+  return listarIpsRede(interfaces);
 }
 
 /**
@@ -167,20 +160,21 @@ function lerArgumentos(argv) {
 }
 
 export async function configurar(opcoes, log = console.log) {
-  const ips = escolherIps(os.networkInterfaces());
+  const ips = listarIpsRede();
   let ip = opcoes.ip;
   if (!ip) {
     if (ips.length === 0) {
-      throw new Error('Nenhum IP de rede local encontrado. Conecte o Wi-Fi/cabo ou use --ip 192.168.x.x.');
+      throw new Error('Nenhum IP de rede local encontrado. Conecte o Wi-Fi/cabo, ligue o hotspot (lab-hotspot.cmd) ou use --ip 192.168.x.x.');
     }
-    ip = ips[0];
+    ip = escolherIpPrincipal();
   }
 
   log('');
   log('  Laboratório offline — configuração automática');
   log('  ' + '-'.repeat(52));
   log(`  IP do notebook : ${ip}`);
-  if (ips.length > 1) log(`  (outros IPs vistos: ${ips.slice(1).join(', ')} — use --ip para escolher outro)`);
+  if (ehHotspotWindows(ip)) log('  Rede           : hotspot do laboratório (tablet na rede NFC-Lab)');
+  if (ips.length > 1) log(`  (outros IPs vistos: ${ips.filter((item) => item !== ip).join(', ')} — use --ip para escolher outro)`);
 
   const urlSupabase = `http://${ip}:54321`;
   const urlPainel = `http://${ip}:5500`;
